@@ -11,6 +11,7 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+.venv-agents/          # AutoGen / CrewAI 专用隔离环境（体积大，不入库）
 
 # IDE
 .idea/
