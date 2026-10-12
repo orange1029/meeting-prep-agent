@@ -20,4 +20,4 @@ venv/
 # 数据与输出
 *.csv
 *.parquet
-.ipynb_checkpoints/
+.ipynb_checkpoints/eval_result.json
