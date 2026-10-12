@@ -1,0 +1,22 @@
+# 环境变量与密钥 —— 绝不提交
+.env
+
+# 长期记忆库 —— 含个人信息（姓名/邮箱/偏好），绝不提交
+memory/
+*.bak
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+
+# 数据与输出
+*.csv
+*.parquet
+.ipynb_checkpoints/
