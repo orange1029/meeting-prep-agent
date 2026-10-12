@@ -21,3 +21,6 @@ venv/
 *.csv
 *.parquet
 .ipynb_checkpoints/eval_result.json
+
+# trace 运行产物
+trace_*.jsonl

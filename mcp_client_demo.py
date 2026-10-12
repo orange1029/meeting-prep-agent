@@ -37,6 +37,15 @@ from fastmcp.client.transports import (
 )
 from openai import OpenAI
 
+# trace 接入：只 import，业务逻辑零改动
+from trace_logger import (
+    EVENT_LLM_REQUEST,
+    EVENT_LLM_RESPONSE,
+    EVENT_TOOL_CALL,
+    Tracer,
+    _summarize_args,
+)
+
 load_dotenv()
 
 MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
@@ -86,11 +95,29 @@ def strip_title(obj):
     return obj
 
 
-async def run(question, server_url=None, verbose=True):
+async def run(question, server_url=None, verbose=True, trace=True):
     client_llm = OpenAI(
         api_key=os.environ["DEEPSEEK_API_KEY"],
         base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
     )
+
+    # 【trace 接入点 0】建 tracer。整个函数体包在 try/finally 里，
+    # 保证无论正常结束还是抛异常，trace 文件都会被 close 并写 session_end。
+    # 少了这个，异常退出会留下一个「看起来没跑完」的 trace 文件。
+    tracer = Tracer(output_dir=os.path.dirname(os.path.abspath(__file__)),
+                    console=False) if trace else Tracer(enabled=False)
+    try:
+        return await _run_inner(client_llm, question, server_url, verbose,
+                                trace=tracer)
+    finally:
+        trace_path = tracer.close()
+        if trace:
+            print(f"\n  trace 已写入：{os.path.basename(trace_path)}")
+
+
+async def _run_inner(client_llm, question, server_url, verbose, trace):
+    """真正的 Agent 逻辑。拆出来是为了让 run() 只管 trace 的生命周期，
+    业务逻辑这一层可以完全无视 trace 的存在。"""
 
     # ---- 1. 连上 MCP server ----
     if server_url:
@@ -143,15 +170,31 @@ async def run(question, server_url=None, verbose=True):
         ]
 
         for rnd in range(1, MAX_ROUNDS + 1):
-            resp = client_llm.chat.completions.create(
-                model=MODEL,
-                messages=messages,
-                tools=openai_tools,
-                tool_choice="auto",
-                # 思考模式下 max_tokens 是思考链+正文共享的，给足余量
-                max_tokens=3000,
-            )
-            msg = resp.choices[0].message
+            # 【trace 接入点 1】LLM 请求——用 span 包住，退出时自动记录耗时。
+            # 只包一层 with，**不改变任何原有逻辑**。
+            trace.event(EVENT_LLM_REQUEST, round=rnd, model=MODEL,
+                        tools_count=len(openai_tools),
+                        messages_count=len(messages))
+            with trace.span(EVENT_LLM_RESPONSE, round=rnd) as sp:
+                resp = client_llm.chat.completions.create(
+                    model=MODEL,
+                    messages=messages,
+                    tools=openai_tools,
+                    tool_choice="auto",
+                    # 思考模式下 max_tokens 是思考链+正文共享的，给足余量
+                    max_tokens=3000,
+                )
+                msg = resp.choices[0].message
+
+                # usage 从 API 响应里取，是真实计费口径
+                usage = getattr(resp, "usage", None)
+                sp.add(
+                    content_len=len(msg.content or ""),
+                    tool_calls_count=len(msg.tool_calls or []),
+                    prompt_tokens=getattr(usage, "prompt_tokens", 0),
+                    completion_tokens=getattr(usage, "completion_tokens", 0),
+                )
+                # 【trace 接入点 1 结束】
 
             if not msg.tool_calls:
                 print(f"\n【Agent 回答】\n{msg.content}")
@@ -166,16 +209,27 @@ async def run(question, server_url=None, verbose=True):
                 print(f"         参数：{args}")
 
                 # ---- 4. 转发给 MCP server 执行 ----
-                result = await mcp.call_tool(name, args)
+                # 【trace 接入点 2】工具调用——用 span 包住，退出时记录
+                # 耗时 + 结果长度 + 成功与否。同样不改原逻辑。
+                with trace.span(EVENT_TOOL_CALL, round=rnd, name=name,
+                                args_summary=_summarize_args(args)) as sp:
+                    result = await mcp.call_tool(name, args)
 
-                # MCP 返回 CallToolResult，文本在 content 里
-                payload = None
-                for block in (result.content or []):
-                    if getattr(block, "type", None) == "text":
-                        payload = block.text
-                        break
-                if payload is None:
-                    payload = str(result)
+                    # MCP 返回 CallToolResult，文本在 content 里
+                    payload = None
+                    for block in (result.content or []):
+                        if getattr(block, "type", None) == "text":
+                            payload = block.text
+                            break
+                    if payload is None:
+                        payload = str(result)
+
+                    # 工具自己返回的 {"error": ...} 也算失败，
+                    # 必须单独标出来——否则链路追踪会显示「一切正常」，
+                    # 实际参数是错的
+                    ok = '"error"' not in payload[:200]
+                    sp.add(result_len=len(payload), ok=ok)
+                # 【trace 接入点 2 结束】
 
                 print(f"         server 返回：{payload[:160]}")
 
