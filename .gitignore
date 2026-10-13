@@ -24,3 +24,6 @@ venv/
 
 # trace 运行产物
 trace_*.jsonl
+
+# 简报输出（可按需保留，默认不入库）
+briefings/

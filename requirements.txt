@@ -1,0 +1,20 @@
+# 会前简报 Agent —— 最小依赖
+#
+# 只覆盖 meeting_prep_agent.py 及其直接依赖。
+# 项目里其他模块（LangGraph / MCP / AutoGen / CrewAI）需要额外安装，
+# 见 README 的「项目背景」章节。
+
+openai>=1.0          # DeepSeek 兼容 OpenAI 协议
+python-dotenv>=1.0   # 读取 .env
+pytest>=7.0          # 测试（可选）
+
+# ---------------------------------------------------------------------------
+# 以下是项目中其他模块的依赖，**会前简报本身不需要**。
+# 注意：AutoGen / CrewAI 依赖树庞大且会改动 pydantic、openai 版本，
+# **不要装进主环境**，用独立虚拟环境（见 README）。
+# ---------------------------------------------------------------------------
+# langgraph>=0.2                                  # multi_agent_graph.py
+# fastmcp>=2.0                                    # mcp_server.py / mcp_client_demo.py
+# "autogen-agentchat>=0.4"                        # demo_autogen.py
+# "autogen-ext[openai]"                           # demo_autogen.py
+# crewai                                          # demo_crewai.py

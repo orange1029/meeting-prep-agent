@@ -42,6 +42,12 @@ MOCK_CUSTOMERS = [
      "contact": "孙丽", "email": "sunli@yonghui.com"},
     {"id": "C-008", "name": "深圳平安银行", "industry": "金融", "city": "深圳",
      "contact": "周杰", "email": "zhoujie@pingan.com"},
+    # 招商银行：会前简报 demo 的主角。归档在「深圳」略显刻意，
+     # 改分行更贴近真实——但 id 已占用，只能保持现有结构
+    {"id": "C-013", "name": "招商银行", "industry": "金融", "city": "上海",
+     "contact": "王志华", "email": "wangzhihua@cmbchina.com"},
+    {"id": "C-014", "name": "上海汇丰银行", "industry": "金融", "city": "上海",
+     "contact": "何雯", "email": "hewen@hsbc.com"},
     {"id": "C-009", "name": "上海复旦软件", "industry": "互联网", "city": "上海",
      "contact": "吴敏", "email": "wumin@fudan-soft.com"},
     {"id": "C-010", "name": "北京四中道元", "industry": "教育", "city": "北京",
@@ -398,11 +404,14 @@ def run_tool(name, arguments):
 def _selftest():
     ok = total = 0
 
-    def check(label, cond):
+    def check(label, cond, detail=""):
+        # detail 可选：断言失败时把实际值打出来，省去手动复现的麻烦。
+        # 我第一版只有两个参数，写断言时想带上下文才发现传不了。
         nonlocal ok, total
         total += 1
         ok += bool(cond)
-        print(f"  {'✓' if cond else '✗'} {label}")
+        mark = "✓" if cond else "✗"
+        print(f"  {mark} {label}" + (f"  → {detail}" if not cond and detail else ""))
 
     print("=" * 60)
     print("Tool 1: query_customers")
@@ -413,9 +422,13 @@ def _selftest():
     check("limit 生效", len(query_customers(industry="", city="", limit=3)["customers"]) == 3)
     check("limit 超上限被截断", query_customers(limit=9999)["limit" ] if False else
           len(query_customers(limit=9999)["customers"]) <= 100)
-    check("空条件查全部", query_customers()["total"] == 12)
+    check("空条件查全部",
+          query_customers()["total"] == len(MOCK_CUSTOMERS),
+          f"实际 {query_customers()['total']} vs 库中 {len(MOCK_CUSTOMERS)}")
     check("行业模糊匹配 '教育行业'", query_customers(industry="教育行业")["total"] == 4)
-    check("'None' 视为不限", query_customers(industry="None", city="null")["total"] == 12)
+    # 不能写死总数——加客户数据后总数会变。断言的是「不限条件」这个语义。
+    check("'None' 视为不限",
+          query_customers(industry="None", city="null")["total"] == len(MOCK_CUSTOMERS))
 
     print("=" * 60)
     print("Tool 2: query_deals")
