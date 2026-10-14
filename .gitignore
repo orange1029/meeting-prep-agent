@@ -9,9 +9,14 @@ memory/
 __pycache__/
 *.py[cod]
 *.egg-info/
+
+# 虚拟环境
+# 注意：git 的 .gitignore 不支持行尾注释。
+# 写成 ".venv-agents/   # 说明" 会让整行（含 # 和空格）都变成 pattern 而失效，
+# 结果 .venv-agents/ 反而没被忽略。注释必须单独占一行。
 .venv/
 venv/
-.venv-agents/          # AutoGen / CrewAI 专用隔离环境（体积大，不入库）
+.venv-agents/
 
 # IDE
 .idea/
@@ -20,10 +25,13 @@ venv/
 # 数据与输出
 *.csv
 *.parquet
-.ipynb_checkpoints/eval_result.json
+.ipynb_checkpoints/
+
+# 评估运行结果（每次跑都变，不入库）
+eval_result.json
 
 # trace 运行产物
 trace_*.jsonl
 
-# 简报输出（可按需保留，默认不入库）
+# 简报输出（本地保留，不入库）
 briefings/
