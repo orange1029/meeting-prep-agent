@@ -54,7 +54,7 @@ python meeting_prep_agent.py --client "招商银行" --industry "金融" --topic
 需要 Python 3.10+。
 
 ```bash
-git clone <this-repo>
+git clone https://github.com/orange1029/meeting-prep-agent.git
 cd meeting-prep-agent
 
 python -m venv .venv
