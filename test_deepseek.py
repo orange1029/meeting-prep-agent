@@ -27,6 +27,7 @@ import os
 import sys
 import time
 
+import pytest
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -155,11 +156,21 @@ def run_json_mode(client, model=MODEL):
 
 
 def test_api_key_configured():
-    """测试 0：确认密钥已配置，避免其他测试莫名失败"""
-    assert API_KEY, (
-        "未找到 DEEPSEEK_API_KEY（DeepSeek API 密钥）。"
-        "请在同目录 .env 文件中填入，或设置环境变量。"
-    )
+    """测试 0：确认密钥已配置，避免其他测试莫名失败
+
+    没有密钥时**跳过**而不是失败。
+    「没配 key」不是代码有问题，是环境没就绪——
+    报成 fail 会让人以为代码坏了，实际上其他联网测试
+    已经由 conftest.py 的 client fixture 在无 key 时统一 skip 了。
+
+    之前这里用的是 assert，在没有 .env 的干净副本上跑 pytest 会挂，
+    制造了一个和代码质量无关的假失败。
+    """
+    if not API_KEY:
+        pytest.skip(
+            "未配置 DEEPSEEK_API_KEY（DeepSeek API 密钥），跳过需要联网的测试。"
+            " 配置方法见 .env 文件。"
+        )
     assert not API_KEY.startswith("sk-在这里"), ".env 里还是占位符，没换成真密钥"
 
 

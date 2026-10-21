@@ -30,6 +30,7 @@ meeting_prep_agent.py — 会前简报 Agent
 import argparse
 import json
 import os
+import re
 import sys
 import time
 from datetime import date
@@ -37,7 +38,7 @@ from datetime import date
 from dotenv import load_dotenv
 from openai import OpenAI
 
-from prep_tools_impl import run_prep_tool
+from prep_tools_impl import find_customer, run_prep_tool
 from prep_tools_schema import ALL_PREP_TOOLS
 
 load_dotenv()
@@ -55,7 +56,19 @@ SYSTEM_PROMPT = (
     "3. 找不到历史沟通记录时，明确写「无历史记录（首次接触或未存档）」，"
     "不要虚构过往会议。"
     "4. 输出简洁、信息密度高，顾问要在会前 3 分钟读完。"
+    "5. 引用历史沟通时用可读标签（如「招商银行·遗留问题」），"
+    "不要出现 M0003 这类内部编号——那是系统内部主键，顾问看不懂。"
 )
+
+# 历史沟通的分类顺序。渲染简报和喂给 LLM 用同一份，避免两处说法不一致。
+# 键名对应 get_meeting_history 返回的字段名。
+HISTORY_GROUPS = [
+    ("过往会议", "meetings"),
+    ("已承诺事项", "commitments"),
+    ("遗留问题", "open_issues"),
+    ("客户关注点", "focus"),
+    ("其他记录", "others"),
+]
 
 
 # ============ 数据采集 ============
@@ -79,19 +92,30 @@ def collect_data(client, industry, topic, client_llm, trace_progress=True):
     data = {}
 
     p("查客户档案…")
-    r = run_prep_tool("query_customers", {"industry": industry, "limit": 50})
-    customers = r.get("customers", []) if "error" not in r else []
-    # 找到目标客户本身
-    target = next(
-        (c for c in customers
-         if client in c.get("name", "") or c.get("name", "") in client
-         or client in c.get("name", "")),
-        None,
-    )
+    # 客户档案用「客户名」找，不按行业过滤。
+    #
+    # 为什么要分两步：
+    #   第一步按客户名找目标客户 —— 客户名是精确锚点，
+    #     用行业去筛会误杀：用户把「金融」写成「银行」、或客户跨行业时，
+    #     档案就整个丢了（实测 --client 招商银行 --industry 医疗 → 找不到）
+    #   第二步再按行业取同类客户 —— 这才是「同行业参考客户」的用途
+    #
+    # 两个查询都拉全量（limit=100），在内存里筛，
+    # 免得因为 mock 数据少而被 limit 截断。
+    r = run_prep_tool("query_customers", {"limit": 100})
+    all_customers = r.get("customers", []) if "error" not in r else []
     data["profile_error"] = r.get("error")
+
+    target = find_customer(client, all_customers)
     data["customer"] = target
-    data["peers"] = [c for c in customers if not target or c is not target]
-    p(f"命中 {len(customers)} 家，识别出目标客户："
+
+    # 同行业参考客户：优先按目标客户自己的行业取，
+    # 目标客户没找到时退回用户给的行业
+    peer_industry = (target.get("industry") if target else industry) or ""
+    peers = [c for c in all_customers
+             if c is not target and c.get("industry") == peer_industry]
+    data["peers"] = peers
+    p(f"命中 {len(all_customers)} 家，识别出目标客户："
       f"{target['name'] if target else '（档案中未找到）'}")
 
     p("查行业趋势…")
@@ -159,6 +183,15 @@ def build_blocks(data, client, industry, topic):
         if data.get("peers"):
             profile += (f"\n**同行业参考客户**（{len(data['peers'])} 家）："
                         + "、".join(x["name"] for x in data["peers"][:4]))
+        # 用户给的行业和档案里的不一致时，明确提示。
+        # 行业错了会影响第二段行业趋势（按用户给的行业查的），
+        # 不提示的话顾问会拿着错的行业情报去开会。
+        actual = c.get("industry")
+        if actual and industry and actual != industry:
+            profile += (f"\n\n⚠ 你填的行业是「{industry}」，"
+                        f"但「{c['name']}」档案里是「{actual}」。"
+                        f"下面的行业趋势按「{industry}」查询，"
+                        f"若不对请重新生成。")
     else:
         profile = (f"⚠ 档案库中未找到「{client}」。"
                    + (f"（检索错误：{data.get('profile_error')}）"
@@ -184,17 +217,70 @@ def build_blocks(data, client, industry, topic):
                 "并主动确认对方的现状与痛点。")
     else:
         parts = [f"记忆库中命中 {h['count']} 条相关记录。"]
-        for label, key in [("过往会议", "meetings"),
-                           ("已承诺事项", "commitments"),
-                           ("遗留问题", "open_issues"),
-                           ("客户关注点", "focus"),
-                           ("其他记录", "others")]:
+        for label, key in HISTORY_GROUPS:
             if h.get(key):
                 parts.append(f"\n**{label}**：")
-                parts.extend(f"- {m['content']}" for m in h[key])
+                # 记忆内容理论上不含内部编号，但纵深防御：
+                # 万一某条记忆正文里写了「见 M0003」，不该漏到顾问眼前
+                parts.extend(f"- {_clean_memory_ids(m['content'])}"
+                             for m in h[key])
         hist = "\n".join(parts)
 
     return profile, news_block, hist
+
+
+def _clean_memory_ids(text):
+    """把记忆内部编号（M0003 这种）从文本里擦掉。
+
+    为什么需要这个：
+    记忆库里每条记录有形如 M0003 的内部编号。那是存储层的主键，
+    对顾问毫无意义——顾问看到「M0003 遗留的一期建设范围」根本不知道
+    那是什么，只会觉得简报没写完。
+
+    LLM 之所以会引用这些编号，是因为它拿到的原始记忆 JSON 里带着
+    id 字段。修法是双保险：
+      1. 喂事实时不喂 id（见 _history_facts）
+      2. 生成后再扫一遍，兜住漏网的引用
+
+    注意只擦 M+数字 这种形态，且要求前后不是字母数字，
+    避免误伤正常文本（比如 "M30 机型"）。
+
+    擦完还要收拾残局：空括号「（）」和多余空格。
+    """
+    s = re.sub(r"(?<![A-Za-z0-9])M\d{3,4}(?![A-Za-z0-9])", "", text or "")
+    # 编号被擦掉后可能留下空括号
+    s = re.sub(r"[（(]\s*[）)]", "", s)
+    # 连续空格压成一个，行首的删掉
+    s = re.sub(r"[ \t]{2,}", " ", s)
+    return s.strip()
+
+
+def _history_facts(history):
+    """把历史沟通整理成给 LLM 看的可读事实列表。
+
+    原始记忆的 content 字段本身是干净的（不含 ID），
+    但 id 字段会被 LLM 顺手引用。所以这里只给「内容 + 可读标签」，
+    不给 id。
+
+    标签用「客户名·分类」而不是编号，这样 LLM 引用时写出来的是
+    「招商银行·遗留问题」，顾问一看就懂。
+    """
+    h = history or {}
+    if not h.get("has_history"):
+        return []
+
+    client = h.get("client") or ""
+    facts = []
+    for label, key in HISTORY_GROUPS:
+        for m in (h.get(key) or []):
+            content = _clean_memory_ids(m.get("content", ""))
+            if not content:
+                continue
+            facts.append({
+                "标签": f"{client}·{label}" if client else label,
+                "内容": content,
+            })
+    return facts
 
 
 def generate_suggestion(client, industry, topic, data, client_llm):
@@ -211,7 +297,9 @@ def generate_suggestion(client, industry, topic, data, client_llm):
         "行业动态": [{"日期": n["date"], "标题": n["title"],
                      "影响": n["impact"], "摘要": n["summary"]}
                     for n in (data.get("news") or [])],
-        "历史沟通": (data.get("history") or {}).get("all_memories"),
+        # 历史沟通用可读标签，不喂原始 id —— 否则 LLM 会引用
+        # 「M0003」这种内部编号，顾问看不懂
+        "历史沟通": _history_facts(data.get("history")),
         "数据缺失项": [k for k in ("profile_error", "news_error", "history_error")
                        if data.get(k)],
         "是否首次接触": not (data.get("history") or {}).get("has_history", False),
@@ -226,7 +314,9 @@ def generate_suggestion(client, industry, topic, data, client_llm):
         f"2. 必须包含：开场切入建议、本次要确认的问题、需要带的数据或材料\n"
         f"3. 若无历史记录，第一条要说明这是首次深度沟通，应侧重建立信任与摸清现状\n"
         f"4. 不要写「建议进一步了解」这类空话，每条都要具体可执行\n"
-        f"5. 只用上面事实里有的信息，不要编造客户背景"
+        f"5. 只用上面事实里有的信息，不要编造客户背景\n"
+        f"6. 引用历史沟通时用事实里的「标签」原文（如「招商银行·遗留问题」），"
+        f"不要引用任何形如 M0003 的内部编号"
     )
 
     try:
@@ -236,7 +326,9 @@ def generate_suggestion(client, industry, topic, data, client_llm):
                       {"role": "user", "content": prompt}],
             max_tokens=1500,
         )
-        return (r.choices[0].message.content or "").strip()
+        # 兜底：即使 LLM 还是吐出了编号（历史记忆 content 里本身可能带），
+        # 也在最终输出里擦掉
+        return _clean_memory_ids((r.choices[0].message.content or "").strip())
     except Exception as e:
         return f"⚠ 建议生成失败（{type(e).__name__}: {e}），请人工补充。"
 

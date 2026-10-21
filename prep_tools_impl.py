@@ -172,8 +172,13 @@ def search_industry_news(industry="", days=30, **kwargs):
     if not industry:
         return {"error": "industry 为空，请指定行业名称，如 金融、医疗、教育"}
 
+    # 空串按「没传」处理，跟 tools_impl._clean() 的约定一致。
+    # 之前只判了 None，days="" 会直接 int() 抛错报回去——
+    # 但模型在 tools=[] 场景下确实会传空串。
+    if days is None or (isinstance(days, str) and not days.strip()):
+        days = 30
     try:
-        days = int(days if days is not None else 30)
+        days = int(days)
     except (TypeError, ValueError):
         return {"error": f"days 必须是整数，收到 '{days}'"}
     if days < 1 or days > 365:
@@ -217,6 +222,86 @@ def search_industry_news(industry="", days=30, **kwargs):
     }
 
 
+# 客户名别名。让「招行」能命中「招商银行」。
+# 统一放在这里：档案查找和历史沟通查找共用同一张表，
+# 避免出现「历史沟通查得到、档案查不到」这种自相矛盾的情况。
+#
+# 值必须是客户库里真实存在的名字片段（匹配时按「包含」判），
+# 否则别名指向一个不存在的名字，别名就等于失效。
+# 例：中信证券在客户库里的全名是「广州中信证券」，
+#     所以别名值写「中信证券」而不是「中信银行」。
+CLIENT_ALIASES = {
+    "招行": "招商银行",
+    "招商": "招商银行",
+    "招行股份": "招商银行",
+    "平安": "平安银行",
+    "汇丰": "汇丰银行",
+    "中信": "中信证券",
+    "华山": "华山医院",
+    "交大": "交大教育科技",
+    "启明": "启明中学",
+}
+
+# 子串匹配的最短长度门槛。
+# 客户名只有 2 个字时（「银行」「上海」「医院」）查询意图太模糊，
+# 命中谁都可能是错的。宁可报「未找到」让顾问确认，
+# 也不给一份错的档案——错的档案比没有档案危险得多。
+_MIN_SUBSTRING_LEN = 3
+
+
+def find_customer(client_name, customers):
+    """在客户列表里定位目标客户。命中返回客户 dict，未命中返回 None。
+
+    匹配分级，先精确后模糊：
+
+      1. 客户号精确匹配（C-013）
+      2. 客户名精确匹配
+      3. 别名表匹配（招行 → 招商银行）
+      4. 子串匹配 —— 要求较短一方至少 _MIN_SUBSTRING_LEN 个字
+
+    第 4 条的长度门槛是刻意的，见 _MIN_SUBSTRING_LEN 的注释。
+    """
+    name = _clean(client_name)
+    if not name or not customers:
+        return None
+
+    # 1. 客户号
+    for c in customers:
+        if c.get("id", "").lower() == name.lower():
+            return c
+
+    # 2. 名称精确
+    for c in customers:
+        if c.get("name", "") == name:
+            return c
+
+    # 3. 别名。别名值按「包含」匹配客户名——
+    #    「中信」→「中信证券」要能命中「广州中信证券」
+    alias = CLIENT_ALIASES.get(name)
+    if alias:
+        for c in customers:
+            cname = c.get("name", "")
+            if not cname:
+                continue
+            if alias == cname or alias in cname or cname in alias:
+                return c
+
+    # 4. 子串（双向）。原始代码写的是 `client in name or name in client`，
+    #    那个写法在「客户名是查询的子串」时会误命中：
+    #    查「银行」会命中「深圳平安银行」，查「上海」会命中「上海交大教育科技」。
+    #    现在加上长度门槛，把这类模糊查询挡在外面。
+    for c in customers:
+        cname = c.get("name", "")
+        if not cname:
+            continue
+        shorter = min(len(name), len(cname))
+        if shorter < _MIN_SUBSTRING_LEN:
+            continue
+        if name in cname or cname in name:
+            return c
+    return None
+
+
 def get_meeting_history(client_name="", **kwargs):
     """查询客户历史沟通摘要。
 
@@ -239,11 +324,8 @@ def get_meeting_history(client_name="", **kwargs):
 
     store = MemoryStore()
 
-    # 客户名别名，让「招行」能命中「招商银行」
-    aliases = {"招行": "招商银行", "招商": "招商银行",
-               "平安": "平安银行", "工行": "工商银行", "建行": "建设银行",
-               "交行": "交通银行", "中信": "中信银行"}
-    matched_name = aliases.get(client_name, client_name)
+    # 别名表与 find_customer 共用，确保两处行为一致
+    matched_name = CLIENT_ALIASES.get(client_name, client_name)
 
     # 匹配记忆条目：内容里出现客户名或别名的都算
     related = []

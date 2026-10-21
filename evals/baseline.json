@@ -1,0 +1,68 @@
+{
+  "note": "评估基线。跑 eval_mcp_agent.py --save-baseline 更新。",
+  "model": "deepseek-v4-flash",
+  "cases": 14,
+  "tool_accuracy": 1.0,
+  "answer_accuracy": 1.0,
+  "pass_rate": 1.0,
+  "avg_latency": 2.62,
+  "avg_tokens": 2098.6,
+  "per_case": {
+    "1": {
+      "pass": true,
+      "tool_ok": true
+    },
+    "2": {
+      "pass": true,
+      "tool_ok": true
+    },
+    "3": {
+      "pass": true,
+      "tool_ok": true
+    },
+    "4": {
+      "pass": true,
+      "tool_ok": true
+    },
+    "5": {
+      "pass": true,
+      "tool_ok": true
+    },
+    "6": {
+      "pass": true,
+      "tool_ok": true
+    },
+    "7": {
+      "pass": true,
+      "tool_ok": true
+    },
+    "8": {
+      "pass": true,
+      "tool_ok": true
+    },
+    "9": {
+      "pass": true,
+      "tool_ok": true
+    },
+    "10": {
+      "pass": true,
+      "tool_ok": true
+    },
+    "11": {
+      "pass": true,
+      "tool_ok": true
+    },
+    "12": {
+      "pass": true,
+      "tool_ok": true
+    },
+    "13": {
+      "pass": true,
+      "tool_ok": true
+    },
+    "14": {
+      "pass": true,
+      "tool_ok": true
+    }
+  }
+}

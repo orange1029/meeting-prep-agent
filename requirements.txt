@@ -2,7 +2,7 @@
 #
 # 只覆盖 meeting_prep_agent.py 及其直接依赖。
 # 项目里其他模块（LangGraph / MCP / AutoGen / CrewAI）需要额外安装，
-# 见 README 的「项目背景」章节。
+# 见 README 的「仓库里还有什么」章节。
 
 openai>=1.0          # DeepSeek 兼容 OpenAI 协议
 python-dotenv>=1.0   # 读取 .env

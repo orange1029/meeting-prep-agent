@@ -19,6 +19,17 @@ load_dotenv()
 
 API_KEY = os.getenv("DEEPSEEK_API_KEY", "").strip()
 
+# ---- 不收集 pr_langgraph/ 里的文件 ----
+# 那个目录是**给上游 LangGraph 仓库的交付物**：
+# 补丁 + 上游自己的测试 + PR 描述。
+# 其中 test_branch_path_map_error.py 依赖 langgraph 包和上游的测试布局，
+# 在本项目里跑必然失败（ModuleNotFoundError: langgraph）。
+#
+# 它不是本项目的测试，是「准备发出去的东西」，所以要排除。
+# 用 collect_ignore 而不是改文件名：改文件名会让人以为
+# 那个文件是本项目的测试，反而更容易误解。
+collect_ignore = ["pr_langgraph"]
+
 
 @pytest.fixture(scope="session")
 def client():

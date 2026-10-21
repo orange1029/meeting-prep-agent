@@ -48,135 +48,18 @@ MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
 MAX_ROUNDS = 5
 
 # ============ 测试用例 ============
-# category: normal / cross / empty / ambiguous
-# expect_tool: 期望调用的工具；None 表示「不该调工具」（纯闲聊）
-# must_contain: 答案必须包含的关键字（任一命中即可，除非 require_all）
-# must_not: 答案不能出现的内容（用于检测编造）
+# 用例数据在 evals/mcp_agent_cases.yaml —— 加用例改文件，不改代码。
+# 加载与校验在 eval_cases.py（独立模块，不依赖 fastmcp，
+# 这样主环境也能跑配置校验测试）。
 
-CASES = [
-    {
-        "id": 1,
-        "category": "normal",
-        "question": "查一下上海有哪些教育行业的客户",
-        "expect_tool": "query_customers",
-        "must_contain": ["上海交大", "启明"],
-    },
-    {
-        "id": 2,
-        "category": "normal",
-        "question": "金融行业有哪些客户？",
-        "expect_tool": "query_customers",
-        "must_contain": ["平安"],
-    },
-    {
-        "id": 3,
-        "category": "normal",
-        "question": "上海的成交记录",
-        "expect_tool": "query_deals",
-        "must_contain": ["金额", "万"],
-    },
-    {
-        "id": 4,
-        "category": "normal",
-        "question": "医疗行业客户名单",
-        "expect_tool": "query_customers",
-        "must_contain": ["医院"],
-    },
-    {
-        "id": 5,
-        "category": "normal",
-        "question": "深圳的成交情况",
-        "expect_tool": "query_deals",
-        "must_contain": ["华为"],
-    },
-    {
-        "id": 6,
-        "category": "cross",
-        "question": "上海有哪些医疗行业的客户？",
-        "expect_tool": "query_customers",
-        "must_contain": ["华山"],
-        # 关键：上海的医疗客户只有华山一家，
-        # 如果模型把北京的协和也答进来，说明 city 过滤没生效
-        "must_not": ["协和"],
-    },
-    {
-        "id": 7,
-        "category": "cross",
-        "question": "北京教育行业有哪些客户？",
-        "expect_tool": "query_customers",
-        "must_contain": ["新东方", "四中"],
-    },
-    {
-        "id": 8,
-        "category": "empty",
-        "question": "查一下上海的航空航天行业客户",
-        "expect_tool": "query_customers",
-        # 关键：mock 数据里没有航空航天，Agent 必须说「没有」
-        # 而不是编一家「上海航天科技」出来
-        "must_contain": ["没有", "0", "未找到", "不存在"],
-        "must_not": ["航空航天科技", "航天科技公司"],
-        # 零结果场景 Agent 往往会二次查询做自查（确认「是不是真没有」），
-        # 这是严谨行为不是缺陷，所以允许多次调用
-        "max_calls": 3,
-    },
-    {
-        "id": 9,
-        "category": "empty",
-        "question": "乌鲁木齐的客户名单",
-        "expect_tool": "query_customers",
-        "must_contain": ["没有", "0", "未找到", "不存在"],
-    },
-    {
-        "id": 10,
-        "category": "ambiguous",
-        "question": "已成交的商机有哪些？",
-        "expect_tool": "query_deals",
-        # 没说城市→模型应留空（不限），不能瞎猜一个城市
-        # 期望答案里含有真实的已成交记录（won 的有上海2笔、北京1笔、深圳1笔）
-        "must_contain": ["交大", "启明", "新东方", "华为"],
-        "min_hits": 3,          # 4 笔已成交里至少答对 3 笔
-    },
-    # ========== 压测用例：第一轮全过说明题目太简单，必须加难的 ==========
-    {
-        "id": 11,
-        "category": "hard_multi",
-        # 同一个问题既要客户又要成交，两个工具都要用。
-        # 这考验的是「能不能串联多个工具」，也考验效率。
-        # 平均调用次数应≤2（一次查客户 + 一次查该客户的成交）
-        "question": "上海的教育行业客户有哪些？他们成交了多少？",
-        "expect_tool": "query_customers",
-        "must_contain": ["交大", "启明"],
-        "max_calls": 2,
-    },
-    {
-        "id": 12,
-        "category": "hard_ambiguous",
-        # 完全没说行业也没说城市，模型必须真的留空而不是瞎猜
-        "question": "有哪些客户？",
-        "expect_tool": "query_customers",
-        # mock 里共 10 个客户，覆盖 教育/互联网/医疗/零售/金融
-        "must_contain": ["交大", "华为", "华山"],
-        "min_hits": 3,
-    },
-    {
-        "id": 13,
-        "category": "hard_wrong_tool",
-        # 问的是客户，但关键词里有「成交」，容易诱导模型选 query_deals。
-        # 这是工具选择的经典陷阱。
-        "question": "上海有哪些客户？成交情况怎么样？",
-        "expect_tool": "query_customers",
-        "must_contain": ["交大"],
-    },
-    {
-        "id": 14,
-        "category": "hard_invalid",
-        # 诱导模型填一个 schema 里不存在的 stage 枚举值。
-        # 期望 server 返回错误后模型能自己改正（错误回传机制是否生效）
-        "question": "查一下阶段是「已签约」的成交记录",
-        "expect_tool": "query_deals",
-        "must_contain": ["won", "合法", "无效", "阶段"],
-    },
-]
+from eval_cases import (  # noqa: E402
+    BASELINE_FILE,
+    CASES_FILE,
+    EVALS_DIR,
+    load_cases,
+)
+
+CASES = load_cases()
 
 
 async def run_case(mcp, client_llm, openai_tools, case, verbose=False):
@@ -297,10 +180,83 @@ async def run_case(mcp, client_llm, openai_tools, case, verbose=False):
     }
 
 
+BASELINE_FILE = os.path.join(EVALS_DIR, "baseline.json")
+
+
+def save_baseline(summary, per_case, path=BASELINE_FILE):
+    """把当前结果存成基线，供下次对比。
+
+    基线要存**入库**（不像 eval_result.json 那样 gitignore），
+    因为它的用途就是「跨次对比」——不入库就失去意义了。
+
+    存的内容只保留评估结论，不存模型原文答案：
+    原文是那一次运行的产物，不该成为基线的一部分。
+    """
+    data = {
+        "note": "评估基线。跑 eval_mcp_agent.py --save-baseline 更新。",
+        "model": summary["model"],
+        "cases": summary["cases"],
+        "tool_accuracy": summary["tool_accuracy"],
+        "answer_accuracy": summary["answer_accuracy"],
+        "pass_rate": summary["pass_rate"],
+        "avg_latency": summary["avg_latency"],
+        "avg_tokens": summary["avg_tokens"],
+        "per_case": {
+            str(cid): {"pass": ok, "tool_ok": t_ok}
+            for cid, ok, t_ok in per_case
+        },
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    return path
+
+
+def load_baseline(path=BASELINE_FILE):
+    """读基线文件。没有基线返回 None（不是错误，是首次运行）"""
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def compare_with_baseline(summary, per_case, baseline):
+    """和基线对比，返回 (回归列表, 改善列表)
+
+    回归 = 基线里通过、这次不通过
+    改善 = 基线里不通过、这次通过
+
+    只看 pass（综合通过），不对比延迟和 token——
+    那两个受网络和服务负载影响太大，当回归信号会产生噪音。
+    指标变化在报告里单独列，不进回归判定。
+    """
+    if not baseline:
+        return [], []
+
+    base_cases = baseline.get("per_case") or {}
+    regressed, improved = [], []
+    for cid, ok, _t_ok in per_case:
+        key = str(cid)
+        if key not in base_cases:
+            continue          # 新增用例，没有基线可比，跳过
+        was = base_cases[key].get("pass")
+        if was is True and not ok:
+            regressed.append(cid)
+        elif was is False and ok:
+            improved.append(cid)
+    return regressed, improved
+
+
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("--only", type=int, help="只跑指定 id 的 case")
+    parser.add_argument("--save-baseline", action="store_true",
+                        help="把这次结果存成基线（改过用例或改过代码后用）")
+    parser.add_argument("--no-compare", action="store_true",
+                        help="跳过与基线的对比")
     args = parser.parse_args()
 
     if not os.environ.get("DEEPSEEK_API_KEY"):
@@ -450,6 +406,55 @@ async def main():
     with open("eval_result.json", "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False, indent=2)
     print(f"\n  详细结果已写入 eval_result.json")
+
+    # ============ 与基线对比 ============
+    # eval_result.json 每次都变（它在 .gitignore 里，这是对的——
+    # 一次运行的产物不该入库）。但那样就没法看「有没有退步」。
+    # 所以另有一份入库的基线文件 evals/baseline.json，
+    # 专门用来回答「这次比上次差了吗」。
+    per_case = [(r["id"], r["pass"], r["tool_ok"]) for r in results]
+
+    if args.save_baseline:
+        p = save_baseline(out, per_case)
+        print(f"  已更新基线：{p}")
+
+    if not args.no_compare:
+        baseline = load_baseline()
+        if baseline is None:
+            print("\n  尚无基线（首次运行）。"
+                  "确认结果没问题后跑一次 --save-baseline 建立基线。")
+        else:
+            regressed, improved = compare_with_baseline(out, per_case, baseline)
+            print(f"\n【与基线对比】基线模型={baseline.get('model')}，"
+                  f"基线通过率={baseline.get('pass_rate', 0) * 100:.0f}%"
+                  f"（{baseline.get('cases')} 个用例）")
+            print(f"  本次通过率          : {pass_n / n * 100:.0f}%（{n} 个用例）")
+
+            if regressed:
+                print(f"  ⚠ 回归用例           : {regressed}")
+                print("    这些用例上次通过、这次不通过。改了代码要查这里。")
+            if improved:
+                print(f"  ↑ 改善用例           : {improved}")
+            if not regressed and not improved:
+                print("  ✓ 与基线一致，无回归也无改善")
+
+            # 指标变化单独列，不进回归判定
+            # 延迟和 token 受网络与负载影响大，当回归信号会全是噪音
+            for key, label in (("tool_accuracy", "工具选择正确率"),
+                               ("answer_accuracy", "答案准确率"),
+                               ("pass_rate", "综合通过率")):
+                base_v = baseline.get(key)
+                if base_v is None:
+                    continue
+                delta = (out[key] - base_v) * 100
+                if abs(delta) >= 0.5:
+                    arrow = "↑" if delta > 0 else "↓"
+                    print(f"  {label:12} {base_v * 100:.0f}% → "
+                          f"{out[key] * 100:.0f}%  {arrow}{abs(delta):.0f}pp")
+
+            if regressed:
+                print("\n  提示：如果是故意改坏再确认修复，可以跑 "
+                      "--save-baseline 刷新基线。")
 
 
 if __name__ == "__main__":

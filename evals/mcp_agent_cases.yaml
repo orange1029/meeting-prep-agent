@@ -1,0 +1,159 @@
+# 会前简报 MCP Agent 评估用例
+#
+# 这个文件是 eval_mcp_agent.py 的用例数据源。
+# 之前 14 个用例硬编码在 Python 里，加一个用例要改代码；
+# 现在用例是数据，加用例只改这个文件。
+#
+# 字段说明：
+#   id            用例编号（唯一，--only 用它筛选单个用例）
+#   category      场景分类
+#                 normal       常规查询
+#                 cross        跨维度组合（行业+城市同时过滤）
+#                 empty        查不到数据（考「不编造」）
+#                 ambiguous    条件不明确（考「不瞎猜」）
+#                 hard_multi   需要串联多个工具
+#                 hard_ambiguous 完全没给条件
+#                 hard_wrong_tool 关键词诱导选错工具
+#                 hard_invalid 诱导填非法参数（考错误回传）
+#   question      提问原文
+#   expect_tool   期望调用的工具；留空（null）表示「不该调工具」
+#   must_contain  答案必须包含的关键词
+#                 默认是**同义词 OR 关系**——命中任意一个就算对。
+#                 「没有查到」「未找到」「不存在」表达的是同一件事，
+#                 没必要要求全中。
+#                 只有「需要多个不同信息都答对」才配 min_hits。
+#   min_hits      must_contain 至少要命中几个，默认 1
+#   must_not      答案不能出现的内容（用于检测编造）
+#   max_calls     工具调用次数上限，超过算「效率不达标」
+#   note          这个用例在考什么（给人看，代码不读）
+
+cases:
+  # ========== 常规查询 ==========
+  - id: 1
+    category: normal
+    question: 查一下上海有哪些教育行业的客户
+    expect_tool: query_customers
+    must_contain: [上海交大, 启明]
+    note: 行业+城市双过滤
+
+  - id: 2
+    category: normal
+    question: 金融行业有哪些客户？
+    expect_tool: query_customers
+    must_contain: [平安]
+    note: 只给行业，跨城市
+
+  - id: 3
+    category: normal
+    question: 上海的成交记录
+    expect_tool: query_deals
+    must_contain: [金额, 万]
+    note: 查成交不是查客户
+
+  - id: 4
+    category: normal
+    question: 医疗行业客户名单
+    expect_tool: query_customers
+    must_contain: [医院]
+    note: 行业名模糊命中（医疗→医院名）
+
+  - id: 5
+    category: normal
+    question: 深圳的成交情况
+    expect_tool: query_deals
+    must_contain: [华为]
+    note: 只给城市
+
+  # ========== 跨维度组合 ==========
+  - id: 6
+    category: cross
+    question: 上海有哪些医疗行业的客户？
+    expect_tool: query_customers
+    must_contain: [华山]
+    must_not: [协和]
+    note: >
+      上海的医疗客户只有华山一家，如果模型把北京的协和也答进来，
+      说明 city 过滤没生效。这是最容易暴露「模型自己加戏」的用例。
+
+  - id: 7
+    category: cross
+    question: 北京教育行业有哪些客户？
+    expect_tool: query_customers
+    must_contain: [新东方, 四中]
+    note: 跨维度组合
+
+  # ========== 查不到数据 ==========
+  - id: 8
+    category: empty
+    question: 查一下上海的航空航天行业客户
+    expect_tool: query_customers
+    must_contain: ["没有", "0", "未找到", "不存在"]
+    must_not: [航空航天科技, 航天科技公司]
+    max_calls: 3
+    note: >
+      mock 数据里没有航空航天，Agent 必须说「没有」而不是编一家
+      「上海航天科技」出来。max_calls 放宽到 3，因为零结果场景
+      Agent 往往会二次查询做自查（确认「是不是真没有」），
+      这是严谨行为不是缺陷。
+
+      注意 must_contain 里的 "0" 必须带引号——YAML 会把裸 0 解析成整数，
+      后面 `k in answer` 就会炸。这是用例外置成 YAML 之后踩的坑。
+
+  - id: 9
+    category: empty
+    question: 乌鲁木齐的客户名单
+    expect_tool: query_customers
+    must_contain: ["没有", "0", "未找到", "不存在"]
+    note: 城市不存在
+
+  # ========== 条件不明确 ==========
+  - id: 10
+    category: ambiguous
+    question: 已成交的商机有哪些？
+    expect_tool: query_deals
+    must_contain: [交大, 启明, 新东方, 华为]
+    min_hits: 3
+    note: >
+      没说城市→模型应留空（不限），不能瞎猜一个城市。
+      期望答案含真实的已成交记录（won 的有上海2笔、北京1笔、深圳1笔），
+      min_hits=3 表示 4 笔里至少答对 3 笔。
+
+  # ========== 压测用例：第一轮全过说明题目太简单，必须加难的 ==========
+  - id: 11
+    category: hard_multi
+    question: 上海的教育行业客户有哪些？他们成交了多少？
+    expect_tool: query_customers
+    must_contain: [交大, 启明]
+    max_calls: 2
+    note: >
+      同一个问题既要客户又要成交，两个工具都要用。
+      考的是「能不能串联多个工具」，也考效率——
+      平均调用次数应≤2（一次查客户 + 一次查该客户的成交）。
+
+  - id: 12
+    category: hard_ambiguous
+    question: 有哪些客户？
+    expect_tool: query_customers
+    must_contain: [交大, 华为, 华山]
+    min_hits: 3
+    note: >
+      完全没说行业也没说城市，模型必须真的留空而不是瞎猜。
+      覆盖多个行业才算答对。
+
+  - id: 13
+    category: hard_wrong_tool
+    question: 上海有哪些客户？成交情况怎么样？
+    expect_tool: query_customers
+    must_contain: [交大]
+    note: >
+      问的是客户，但关键词里有「成交」，容易诱导模型选 query_deals。
+      这是工具选择的经典陷阱。
+
+  - id: 14
+    category: hard_invalid
+    question: 查一下阶段是「已签约」的成交记录
+    expect_tool: query_deals
+    must_contain: [won, 合法, 无效, 阶段]
+    note: >
+      诱导模型填一个 schema 里不存在的 stage 枚举值。
+      期望 server 返回错误后模型能自己改正（考错误回传机制是否生效）。
