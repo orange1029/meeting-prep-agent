@@ -21,6 +21,7 @@ push_all.py — 一键把本地提交推上去 + 更新 LangGraph PR
 """
 
 import argparse
+import base64
 import json
 import os
 import subprocess
@@ -32,6 +33,9 @@ API = "https://api.github.com"
 REPO = "langchain-ai/langgraph"
 PR_NUMBER = 9318
 ISSUE_NUMBER = 9319
+
+OWNER = "orange1029"
+REPO_NAME = "meeting-prep-agent"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(HERE, ".."))
@@ -105,6 +109,138 @@ def git(*args, timeout=120):
     return p.returncode, (p.stdout or "") + (p.stderr or "")
 
 
+# ============ Git Data API 通道（github.com 不通时的唯一出路）============
+# 网络事实（2026-10-21 实测）：
+#   api.github.com  → 200，1.2s   ✓
+#   github.com      → 000，10s 超时 ✗
+# 代理只放行了前者。而 git push / git credential fill / GCM 刷新
+# 全都走 github.com，所以在当前网络下普通 push 一定失败。
+#
+# Git Data API 走 api.github.com，能完成同样的事：
+#   blob → tree → commit → PATCH ref
+# 这是 2026-10-15 那次就用成功过的路径（见当日记忆）。
+
+def api_blob(token, content_bytes):
+    b64 = base64.b64encode(content_bytes).decode("ascii")
+    r = api("POST", f"/repos/{OWNER}/{REPO_NAME}/git/blobs", token,
+            {"content": b64, "encoding": "base64"})
+    return r["sha"]
+
+
+def api_tree(token, base_tree, entries):
+    """entries: [{"path": ..., "mode": ..., "type": "blob", "sha": ...}]"""
+    r = api("POST", f"/repos/{OWNER}/{REPO_NAME}/git/trees", token,
+            {"base_tree": base_tree, "tree": entries})
+    if r.get("truncated"):
+        raise SystemExit("✗ tree 被截断，文件太多，需要分批提交")
+    return r["sha"]
+
+
+def api_commit(token, tree_sha, message, parents):
+    r = api("POST", f"/repos/{OWNER}/{REPO_NAME}/git/commits", token, {
+        "message": message,
+        "tree": tree_sha,
+        "parents": parents,
+    })
+    return r["sha"]
+
+
+def api_update_ref(token, sha, ref="heads/master"):
+    r = api("PATCH", f"/repos/{OWNER}/{REPO_NAME}/git/refs/{ref}", token,
+            {"sha": sha, "force": False})
+    return r.get("object", {}).get("sha")
+
+
+def push_via_api(token, dry_run=False):
+    """用 Git Data API 推代码。
+
+    注意一个已知坑（2026-10-15 踩过）：
+    API 建的 commit sha 和本地 sha 不一样——GitHub 会规范化 author 邮箱大小写
+    （outlook.com → Outlook.com），commit 哈希因此不同。
+    **内容正确 > sha 一致**。判断推成功与否，看 tree sha 是否相同，
+    不要强行对齐 commit sha。
+
+    而且 Git Data API 一次只能推一个 commit（一个 tree），
+    所以这里把待推的多个 commit 压成**一个** commit——
+    对「同步本地成果到远端」这个目的来说完全够用，
+    本地的历史分支还留在本地 git 里。
+    """
+    print("\n  改用 Git Data API 推送（github.com 不通时的唯一出路）")
+
+    # 待推的 commit 列表
+    rc, out = git("rev-list", "--reverse", "origin/master..master")
+    commits = [c for c in out.split() if c]
+    if not commits:
+        print("  没有待推的 commit")
+        return True
+
+    # 收集所有变更文件（相对 origin/master 的最终状态）
+    rc, out = git("diff", "--name-only", "origin/master", "master")
+    files = [f for f in out.splitlines() if f.strip()]
+    if not files:
+        print("  没有文件变更")
+        return True
+
+    print(f"  {len(commits)} 个 commit，{len(files)} 个文件")
+
+    if dry_run:
+        for f in files[:20]:
+            print(f"    {f}")
+        if len(files) > 20:
+            print(f"    … 还有 {len(files) - 20} 个")
+        return True
+
+    # 远端当前 HEAD
+    ref = api("GET", f"/repos/{OWNER}/{REPO_NAME}/git/ref/heads/master", token)
+    base_commit_sha = ref["object"]["sha"]
+    base_commit = api("GET",
+                      f"/repos/{OWNER}/{REPO_NAME}/git/commits/{base_commit_sha}",
+                      token)
+    base_tree = base_commit["tree"]["sha"]
+
+    # 逐个文件建 blob
+    entries = []
+    for path in files:
+        rc, content = git("show", f"master:{path}")
+        if rc != 0:
+            print(f"  ⚠ 跳过 {path}（读取失败）")
+            continue
+        # mode 要跟远端现有的一致；新文件用 100644
+        mode = "100644"
+        try:
+            rc, ls = git("ls-tree", "master", "--", path)
+            if rc == 0 and ls.strip():
+                mode = ls.split()[0]
+        except Exception:
+            pass
+        sha = api_blob(token, content.encode("utf-8"))
+        entries.append({"path": path, "mode": mode, "type": "blob", "sha": sha})
+        print(f"    blob {path}")
+
+    # 建 tree
+    tree_sha = api_tree(token, base_tree, entries)
+
+    # 建 commit：消息取本地最后一个 commit 的
+    rc, msg = git("log", "-1", "--format=%B", "master")
+    new_commit = api_commit(token, tree_sha, msg.strip() or "sync", [base_commit_sha])
+    print(f"  commit {new_commit[:10]}（本地 sha 不同属正常："
+          f"GitHub 会规范化邮箱大小写）")
+
+    # 更新 ref
+    new_ref = api_update_ref(token, new_commit)
+    print(f"  ✓ 已推送，master 现在是 {new_ref[:10]}")
+
+    # 验证：tree sha 相同即内容一致
+    rc, local_tree = git("rev-parse", "master^{tree}")
+    local_tree = local_tree.strip()
+    ok = local_tree == tree_sha
+    print(f"  内容校验：本地 tree {local_tree[:10]} vs 远端 {tree_sha[:10]}"
+          f" → {'一致 ✓' if ok else '不一致 ✗'}")
+    if not ok:
+        print("  注意：tree 不一致说明有文件没推上去，需要核对")
+    return ok
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--token", help="GitHub personal access token")
@@ -139,24 +275,31 @@ def main():
         print(f"\n[1/3] 推送代码（{n} 个待推提交）")
         if n == 0:
             print("  已是最新，跳过")
-        else:
+        elif args.dry_run:
             for ln in out.splitlines():
                 if ln.strip():
                     print(f"    {ln}")
-            if args.dry_run:
-                print("  DRY RUN：跳过实际 push")
+            print("  DRY RUN：跳过实际 push")
+        else:
+            # 先试普通 git push。走 github.com 域名，
+            # 在代理只放行 api.github.com 的网络下会失败——
+            # 失败就自动降级到 Git Data API。
+            url = (f"https://orange1029:{token}@github.com/"
+                   f"{OWNER}/{REPO_NAME}.git")
+            rc, out = git("push", url, "master", timeout=90)
+            # 无论成败都把 remote URL 还原，不留明文 token
+            git("remote", "set-url", "origin",
+                f"https://github.com/{OWNER}/{REPO_NAME}.git")
+
+            if rc == 0:
+                print("  ✓ git push 成功")
             else:
-                # 把 token 拼进 URL 推送——凭据管理器那条路现在不通
-                url = (f"https://orange1029:{token}@github.com/"
-                       f"orange1029/meeting-prep-agent.git")
-                rc, out = git("push", url, "master")
-                # 清掉 URL 里的 token（remote 里不留明文）
-                git("remote", "set-url", "origin",
-                    "https://github.com/orange1029/meeting-prep-agent.git")
-                if rc != 0:
-                    print(out[-800:])
-                    raise SystemExit("✗ push 失败")
-                print("  ✓ 推送成功")
+                head = (out or "").strip().splitlines()
+                print(f"  ✗ git push 失败：{head[-1] if head else '未知错误'}")
+                print("    （github.com 走不通是常见原因，"
+                      "自动改用 Git Data API）")
+                if not push_via_api(token, dry_run=args.dry_run):
+                    raise SystemExit("✗ Git Data API 推送也失败了")
 
     # ---- 2. 更新 PR 正文 ----
     print("\n[2/3] 更新 LangGraph PR 正文")
