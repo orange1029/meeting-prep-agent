@@ -24,17 +24,23 @@ submit_pr_update.py — 一键更新 LangGraph PR #9318 的描述 + 在 issue #9
 用法：
   python submit_pr_update.py --token ghp_xxx
   python submit_pr_update.py --token ghp_xxx --dry-run   # 只看要发什么
+  python submit_pr_update.py                           # 自动找 token
 
-拿 token 的方式：
-  · github.com/settings/tokens 生成 personal access token，
-    勾 public_repo 权限即可（只读公开仓库其实不需要，但更新 PR 需要）
-  · 或者本机已登录 GitHub 时：
-      printf 'protocol=https\nhost=github.com\n\n' | git credential fill
+拿 token 的方式（按顺序自动尝试）：
+  1. --token 参数
+  2. 环境变量 GITHUB_TOKEN / GH_TOKEN
+  3. 本机 Git 凭据（git credential fill）—— 注意这一步在某些网络环境下
+     会失败：GCM 要访问 github.com 拿 OAuth token，而 github.com
+     常常比 api.github.com 慢得多，甚至被代理掐断（实测 502）
+
+token 从 https://github.com/settings/tokens 生成，
+勾 public_repo 权限（只读公开仓库不需要，但更新 PR 需要）。
 """
 
 import argparse
 import json
 import os
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -114,29 +120,142 @@ def request(method, path, token, body=None):
         )
 
 
+def token_from_git_credential(timeout=25):
+    """从本机 Git 凭据里取 token。
+
+    坑：这步在某些网络环境下会失败。
+    Git Credential Manager 要访问 github.com 拿 OAuth token，
+    而 github.com 常常比 api.github.com 慢得多，甚至被代理掐断——
+    实测见过 `fatal: 发送请求时出错。(502) 错误的网关` 和
+    `could not read Username for 'https://github.com': terminal prompts disabled`。
+
+    所以这里必须带 timeout，且失败要安静地返回 None，
+    让调用方继续尝试其他来源。
+
+    提取时有个细节：token 里可能含 '='，用 split('=', 1) 而不是 split('=')
+    ——后者会把后半段截断，拿到的 token 长度不对（实测踩过：
+    40 位 token 被截成不完整的，401 报得很莫名其妙）。
+    """
+    try:
+        p = subprocess.run(
+            ["git", "credential", "fill"],
+            input="protocol=https\nhost=github.com\n\n",
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return None
+
+    for line in (p.stdout or "").splitlines():
+        if line.lower().startswith("password="):
+            tok = line.split("=", 1)[1].strip()
+            if tok:
+                return tok
+    return None
+
+
+def verify_token(token):
+    """验证 token 是否可用，返回登录名或 None"""
+    if not token:
+        return None
+    try:
+        req = urllib.request.Request(f"{API}/user")
+        req.add_header("Authorization", f"token {token}")
+        req.add_header("User-Agent", "meeting-prep-agent-pr-updater")
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return data.get("login")
+    except Exception:
+        return None
+
+
+def find_token(explicit=None):
+    """按优先级找可用 token。找不到返回 None。
+
+    顺序：显式参数 → 环境变量 → .github_token 文件 → git 凭据
+    每找到一个都验证一次，验证不过就试下一个——
+    因为过期 token 存在不代表可用（实测有 401 的旧 token）。
+    """
+    candidates = []
+    if explicit:
+        candidates.append(("命令行参数", explicit))
+    for env_name in ("GITHUB_TOKEN", "GH_TOKEN"):
+        v = os.environ.get(env_name, "").strip()
+        if v:
+            candidates.append((f"环境变量 {env_name}", v))
+
+    # .github_token 文件：内容就是 token，可以带 BOM 或首尾空白
+    tok_file = os.path.join(os.path.dirname(PR_BODY_PATH), "..",
+                            ".github_token")
+    tok_file = os.path.abspath(tok_file)
+    if os.path.exists(tok_file):
+        try:
+            with open(tok_file, "r", encoding="utf-8-sig") as f:
+                v = f.read().strip()
+            if v:
+                candidates.append((f"文件 {tok_file}", v))
+        except OSError:
+            pass
+
+    print("查找 token…")
+    for source, tok in candidates:
+        login = verify_token(tok)
+        if login:
+            print(f"  ✓ {source} 可用（{login}）")
+            return tok
+        print(f"  ✗ {source} 无效或已过期")
+
+    # 最后才试 git 凭据——它最慢，也最容易因网络失败
+    print("  …尝试本机 Git 凭据（可能较慢，取决于网络）")
+    tok = token_from_git_credential()
+    if tok:
+        login = verify_token(tok)
+        if login:
+            print(f"  ✓ Git 凭据可用（{login}）")
+            return tok
+        print("  ✗ Git 凭据里的 token 已过期")
+    else:
+        print("  ✗ 取不到 Git 凭据（网络不通或未登录 GitHub）")
+
+    return None
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--token", required=True, help="GitHub personal access token")
+    ap.add_argument("--token", help="GitHub personal access token（不给就自动找）")
     ap.add_argument("--dry-run", action="store_true", help="只打印要发什么，不真发")
     args = ap.parse_args()
 
     if not os.path.exists(PR_BODY_PATH):
         raise SystemExit(f"✗ 找不到 PR 描述文件：{PR_BODY_PATH}")
 
+    token = find_token(args.token)
+    if not token:
+        raise SystemExit(
+            "\n✗ 找不到可用的 GitHub token。\n\n"
+            "  解决办法（任选一个）：\n"
+            "  1. 生成 token 后直接传：\n"
+            "     python submit_pr_update.py --token ghp_你的token\n"
+            "     （token 在 https://github.com/settings/tokens 生成，勾 public_repo）\n"
+            "  2. 或设环境变量：\n"
+            "     set GITHUB_TOKEN=ghp_你的token\n"
+            "  3. 或在项目根目录建 .github_token 文件，内容就是 token\n"
+            "     （记得加进 .gitignore）\n"
+        )
+
     with open(PR_BODY_PATH, "r", encoding="utf-8") as f:
         pr_body = f.read()
 
     # ---- 先确认身份 ----
-    user = request("GET", "/user", args.token)
+    user = request("GET", "/user", token)
     print(f"✓ 已认证为 {user.get('login')}")
 
     # ---- 检查 PR 当前状态 ----
-    pr = request("GET", f"/repos/{REPO}/pulls/{PR_NUMBER}", args.token)
+    pr = request("GET", f"/repos/{REPO}/pulls/{PR_NUMBER}", token)
     print(f"  PR #{PR_NUMBER}: {pr.get('state')} "
           f"(head={pr.get('head', {}).get('ref')}, "
           f"updated={pr.get('updated_at')})")
 
-    issue = request("GET", f"/repos/{REPO}/issues/{ISSUE_NUMBER}", args.token)
+    issue = request("GET", f"/repos/{REPO}/issues/{ISSUE_NUMBER}", token)
     assignees = [a.get("login") for a in (issue.get("assignees") or [])]
     print(f"  Issue #{ISSUE_NUMBER}: {issue.get('state')}, "
           f"assignees={assignees or '无'}")
@@ -144,7 +263,7 @@ def main():
     # ---- 检查 issue 下是否已有我们的留言（幂等）----
     comments = request("GET",
                        f"/repos/{REPO}/issues/{ISSUE_NUMBER}/comments",
-                       args.token)
+                       token)
     marker = "the clearer error for unknown keys is tracked in #9319"
     already = any(marker in (c.get("body") or "") for c in comments)
     if already:
@@ -161,7 +280,7 @@ def main():
         return
 
     # ---- 更新 PR 正文 ----
-    request("PATCH", f"/repos/{REPO}/pulls/{PR_NUMBER}", args.token,
+    request("PATCH", f"/repos/{REPO}/pulls/{PR_NUMBER}", token,
             {"body": pr_body})
     print(f"✓ 已更新 PR #{PR_NUMBER} 的描述")
 
@@ -169,7 +288,7 @@ def main():
     if not already:
         request("POST",
                 f"/repos/{REPO}/issues/{ISSUE_NUMBER}/comments",
-                args.token, {"body": ISSUE_COMMENT})
+                token, {"body": ISSUE_COMMENT})
         print(f"✓ 已在 issue #{ISSUE_NUMBER} 下留言")
     else:
         print(f"- 跳过 issue 留言（已有）")
