@@ -39,6 +39,17 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(HERE, ".."))
 PR_BODY_PATH = os.path.join(HERE, "PR_DESCRIPTION.md")
 
+# token 存放位置，按优先级：
+#   1. 仓库内的 .github_token（已 gitignore，但可能被删）
+#   2. 工作区的 .github_token —— **工作区不是 git 仓库，绝不会被提交**，
+#      这是更安全的存放位置（2026-10-21 改）
+#   3. 环境变量
+TOKEN_FILE_PATHS = [
+    os.path.join(PROJECT_ROOT, ".github_token"),
+    os.path.abspath(os.path.join(
+        PROJECT_ROOT, "..", "2026-10-21-10-39-59", ".github_token")),
+]
+
 # 重复评论的判定：含关键引用但长度偏短的那条
 DUP_MARKER = "the clearer error for unknown keys is tracked in #9319"
 
@@ -112,21 +123,26 @@ query($owner:String!, $name:String!, $prNum:Int!, $issueNum:Int!) {
 
 
 def find_token(explicit=None):
+    """按优先级找 token。
+
+    顺序：显式参数 → 环境变量 → 各个 .github_token 文件
+    （仓库内的优先，其次工作区的——工作区不是 git 仓库，更安全）
+    """
     if explicit:
         return explicit
     for env in ("GITHUB_TOKEN", "GH_TOKEN"):
         v = os.environ.get(env, "").strip()
         if v:
             return v
-    f = os.path.join(PROJECT_ROOT, ".github_token")
-    if os.path.exists(f):
-        try:
-            with open(f, "r", encoding="utf-8-sig") as fh:
-                v = fh.read().strip()
-            if v:
-                return v
-        except OSError:
-            pass
+    for f in TOKEN_FILE_PATHS:
+        if os.path.exists(f):
+            try:
+                with open(f, "r", encoding="utf-8-sig") as fh:
+                    v = fh.read().strip()
+                if v:
+                    return v
+            except OSError:
+                pass
     return None
 
 
