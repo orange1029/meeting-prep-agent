@@ -217,6 +217,36 @@ def push_via_api(token, dry_run=False):
     """
     print("\n  改用 Git Data API 推送（github.com 不通时的唯一出路）")
 
+    # ⚠️ 先查远端是否已经同步了。
+    # 这个检查是必须的：2026-10-21 实测踩过——
+    # 普通 git push 成功了（但我误判成失败），接着又跑降级通道，
+    # 于是同一个内容被推了两遍，远端多出一条内容完全相同的空转 commit。
+    #
+    # 判断标准：远端 master 的 tree == 本地 master 的 tree，
+    # 说明内容已经一致，不需要再推。
+    rc, local_tree = git("rev-parse", "master^{tree}")
+    local_tree = local_tree.strip()
+    try:
+        ref = api("GET", f"/repos/{OWNER}/{REPO_NAME}/git/ref/heads/master",
+                  token)
+        remote_commit_sha = ref["object"]["sha"]
+        remote_commit = api(
+            "GET",
+            f"/repos/{OWNER}/{REPO_NAME}/git/commits/{remote_commit_sha}",
+            token)
+        remote_tree_sha = remote_commit["tree"]["sha"]
+    except SystemExit:
+        remote_tree_sha = None
+    except (KeyError, TypeError):
+        remote_tree_sha = None
+
+    if remote_tree_sha == local_tree:
+        print(f"  ✓ 远端内容已与本地一致（tree {local_tree[:10]}），无需再推")
+        return True
+    if remote_tree_sha:
+        print(f"  远端 tree {remote_tree_sha[:10]} ≠ 本地 {local_tree[:10]}"
+              f"，需要推")
+
     # 待推的 commit 列表
     rc, out = git("rev-list", "--reverse", "origin/master..master")
     commits = [c for c in out.split() if c]
