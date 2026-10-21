@@ -103,6 +103,56 @@ def find_token(explicit):
     return None
 
 
+def diagnose_repo_access(token, owner, name):
+    """诊断对某个仓库的访问权限，区分 403 和 404。
+
+    这个区分很关键，两种情况的原因完全不同：
+
+    · **403**（Resource not accessible by personal access token）
+      仓库**存在且可见**，只是没给写权限。
+      修法：给 token 加 Contents: Read and write / Pull requests: Read and write。
+
+    · **404**（Not Found）
+      仓库**完全不可见**。私有仓库在 fine-grained PAT（细粒度令牌）
+      下如果没在创建时勾选，就是完全不可见——连存在都查不到。
+      修法：去 token 的设置页把该仓库加进「Repository access」。
+
+    2026-10-21 实测记录：
+      同一个 token，对 fde-checklist 报 403（可见无写权限），
+      对 meeting-prep-agent 报 404（完全不可见）——
+      说明那个 PAT 的仓库授权清单里没勾 meeting-prep-agent。
+    """
+    print(f"\n  诊断 {owner}/{name} 的访问权限：")
+    try:
+        api("GET", f"/repos/{owner}/{name}", token)
+        print("    读：✓ 可见")
+    except SystemExit as e:
+        msg = str(e)
+        if "404" in msg:
+            print("    读：✗ 404 —— 仓库不可见")
+            print("      （私有仓库 + fine-grained PAT 未勾选该仓库 = 完全不可见）")
+        else:
+            print(f"    读：✗ {msg.splitlines()[0]}")
+        return "404"
+
+    # 可见，写权限单独测（用一个必定失败的 sha，能区分 403 和 404）
+    try:
+        api("PUT", f"/repos/{owner}/{name}/contents/.perm_probe.txt", token,
+            {"message": "probe", "content": "cHJvYmU=", "branch": "main",
+             "sha": "0" * 40})
+        print("    写：✓ 有写权限")
+    except SystemExit as e:
+        msg = str(e)
+        if "403" in msg:
+            print("    写：✗ 403 —— 可见但无写权限")
+            print("      （token 需要加 Contents: Read and write 权限）")
+        elif "404" in msg:
+            print("    写：✗ 404 —— 分支或路径不存在（可能正常）")
+        else:
+            print(f"    写：? {msg.splitlines()[0]}")
+    return "403"
+
+
 def git(*args, timeout=120):
     p = subprocess.run(["git", *args], cwd=PROJECT_ROOT,
                        capture_output=True, text=True, timeout=timeout)
@@ -307,13 +357,28 @@ def main():
         body = fh.read()
     pr = api("GET", f"/repos/{REPO}/pulls/{PR_NUMBER}", token)
     print(f"  PR #{PR_NUMBER} 当前 state={pr.get('state')}")
-    if body.strip() == (pr.get("body") or "").strip():
-        print("  已是最新，跳过")
-    elif args.dry_run:
-        print(f"  DRY RUN：将更新 {len(body)} 字符")
-    else:
-        api("PATCH", f"/repos/{REPO}/pulls/{PR_NUMBER}", token, {"body": body})
-        print("  ✓ 已更新")
+
+    try:
+        if body.strip() == (pr.get("body") or "").strip():
+            print("  已是最新，跳过")
+        elif args.dry_run:
+            print(f"  DRY RUN：将更新 {len(body)} 字符")
+        else:
+            api("PATCH", f"/repos/{REPO}/pulls/{PR_NUMBER}", token, {"body": body})
+            print("  ✓ 已更新")
+    except SystemExit as e:
+        msg = str(e)
+        if "403" in msg:
+            print("  ✗ 403 —— token 没有改上游 PR 的权限")
+            print("    上游 langchain-ai/langgraph 是**外部仓库**，")
+            print("    fine-grained PAT 默认对它无写权限。")
+            print("    这不是配置问题：改 PR 正文需要上游授予")
+            print("    「Pull requests: Write」，而这只有在 PR 被重新打开、")
+            print("    且你被 assign 到 #9319 之后才可能。")
+            print("    → 先在 #9319 留言请求 assign（见第 3 步），")
+            print("      PR 正文随之就能改。")
+        else:
+            raise
 
     # ---- 3. 在 issue 留言 ----
     print("\n[3/3] 在 issue #9319 留言请求 assign")
@@ -332,6 +397,11 @@ def main():
             api("POST", f"/repos/{REPO}/issues/{ISSUE_NUMBER}/comments",
                 token, {"body": spu.ISSUE_COMMENT})
             print("  ✓ 已留言")
+
+    # ---- 4. 诊断自己的仓库（推送代码需要）----
+    if not args.skip_push:
+        print("\n[附加] 诊断自己的仓库权限")
+        diagnose_repo_access(token, OWNER, REPO_NAME)
 
     print("\n" + "=" * 60)
     print("  完成")
