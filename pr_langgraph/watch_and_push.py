@@ -236,6 +236,13 @@ def main():
         if fresh and fresh != token:
             print(f"\n[{attempt}] 检测到 token 已更新")
             token = fresh
+
+        # token 没了（用户删了 .github_token 文件）→ 优雅退出，别空转
+        if not token:
+            print(f"\n[{attempt}] token 已不可用（.github_token 被删除？）")
+            print("  → 退出监听。如果还想继续，把新 token 写回 .github_token 后重跑。")
+            return
+
         perm = permission(token)
         print(f"[{attempt}] 权限: {perm}", end="")
 
