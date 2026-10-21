@@ -32,6 +32,7 @@ test_prep_tools.py — 会前简报链路的测试
 import os
 import sys
 import tempfile
+from types import SimpleNamespace
 from unittest import mock
 
 from dotenv import load_dotenv
@@ -40,10 +41,12 @@ load_dotenv()
 
 from meeting_prep_agent import (
     HISTORY_GROUPS,
+    MAX_ROUNDS,
     _clean_memory_ids,
     _history_facts,
     build_blocks,
     collect_data,
+    run_agentic,
 )
 from prep_tools_impl import (
     CLIENT_ALIASES,
@@ -315,6 +318,130 @@ def test_collect_data():
               str(d3["customer"]))
 
 
+def test_run_agentic():
+    print("\n【B3】run_agentic（LLM 自主调工具模式）")
+
+    # 用假 LLM 测：Agent 循环的骨架逻辑不需要真调 API，
+    # 而且真调会有模型随机性（选工具是概率行为），断言没法写死。
+    class FakeToolCall:
+        def __init__(self, cid, name, args):
+            self.id = cid
+            self.function = type("F", (), {
+                "name": name, "arguments": args})()
+
+    class FakeMsg:
+        def __init__(self, content=None, tool_calls=None):
+            self.content = content
+            self.tool_calls = tool_calls
+            self.reasoning_content = None
+
+        def model_dump(self, **kw):
+            """模拟 openai SDK 的 Message.model_dump"""
+            d = {"content": self.content, "tool_calls": self.tool_calls}
+            if self.tool_calls:
+                d["tool_calls"] = [
+                    {"id": tc.id, "type": "function",
+                     "function": {"name": tc.function.name,
+                                  "arguments": tc.function.arguments}}
+                    for tc in self.tool_calls
+                ]
+            return {k: v for k, v in d.items() if v is not None}
+
+    class FakeResp:
+        def __init__(self, msg):
+            self.choices = [SimpleNamespace(message=msg)]
+
+    class FakeLLM:
+        """按预设脚本返回响应"""
+
+        def __init__(self, script):
+            self.script = script
+            self.calls = []
+            self.chat = type("Chat", (), {"completions": self})()
+            self.completions = self
+
+        def create(self, **kw):
+            self.calls.append(kw)
+            if self.script:
+                return self.script.pop(0)
+            return FakeResp(FakeMsg(content="默认回答"))
+
+    # --- 场景 1：模型调一次工具就出答案 ---
+    llm = FakeLLM([
+        FakeResp(FakeMsg(tool_calls=[FakeToolCall("call_1", "query_customers",
+                                                  '{"industry":"金融"}')])),
+        FakeResp(FakeMsg(content="招商银行的简报")),
+    ])
+    with mock.patch("meeting_prep_agent.run_prep_tool") as rt:
+        rt.side_effect = lambda n, a: {"customers": [{"name": "招商银行"}]}
+        content, rounds = run_agentic("招商银行", "金融", "议题", llm,
+                                      verbose=False)
+    check("拿到最终答案", content == "招商银行的简报", content[:40])
+    check("记录了 1 轮工具调用", rounds == 1, f"得到 {rounds}")
+    check("模型收到 tools 定义", "tools" in llm.calls[0])
+    check("tool_choice 为 auto",
+          llm.calls[0].get("tool_choice") == "auto")
+    check("请求带上了 system prompt",
+          llm.calls[0]["messages"][0]["role"] == "system")
+
+    # --- 场景 2：模型不调工具直接回答 ---
+    llm2 = FakeLLM([FakeResp(FakeMsg(content="直接回答"))])
+    content2, rounds2 = run_agentic("招商银行", "金融", "议题", llm2,
+                                    verbose=False)
+    check("不调工具时 rounds=0", rounds2 == 0, f"得到 {rounds2}")
+    check("不调工具时直接返回内容", content2 == "直接回答")
+
+    # --- 场景 3：达到最大轮次的兜底 ---
+    # 模型一直要调工具，循环必须能收敛，不能无限转
+    endless = [FakeResp(FakeMsg(tool_calls=[
+        FakeToolCall(f"call_{i}", "query_customers", '{"industry":"金融"}')]))
+        for i in range(MAX_ROUNDS + 3)]
+    llm3 = FakeLLM(endless)
+    with mock.patch("meeting_prep_agent.run_prep_tool") as rt:
+        rt.side_effect = lambda n, a: {"customers": []}
+        content3, rounds3 = run_agentic("招商银行", "金融", "议题", llm3,
+                                        verbose=False)
+    check("达到轮次上限会收敛", rounds3 == MAX_ROUNDS, f"得到 {rounds3}")
+    check("未完成时给出明确说明",
+          "未完成" in content3 or "最大轮次" in content3, content3[:50])
+
+    # --- 场景 4：tool_call_id 配对 ---
+    # 这是 Agent 循环最容易出错的地方：
+    # 回传工具结果时 tool_call_id 必须和请求里的 tc.id 对应
+    llm4 = FakeLLM([
+        FakeResp(FakeMsg(tool_calls=[
+            FakeToolCall("call_A", "query_customers", '{"industry":"金融"}'),
+            FakeToolCall("call_B", "get_meeting_history",
+                         '{"client_name":"招商银行"}')])),
+        FakeResp(FakeMsg(content="完成")),
+    ])
+    with mock.patch("meeting_prep_agent.run_prep_tool") as rt:
+        rt.side_effect = lambda n, a: {"ok": True}
+        run_agentic("招商银行", "金融", "议题", llm4, verbose=False)
+    second_call = llm4.calls[1]
+    tool_msgs = [m for m in second_call["messages"] if m.get("role") == "tool"]
+    check("两个工具结果都回传了", len(tool_msgs) == 2, f"得到 {len(tool_msgs)}")
+    check("tool_call_id 与请求配对",
+          sorted(m["tool_call_id"] for m in tool_msgs) == ["call_A", "call_B"],
+          str([m["tool_call_id"] for m in tool_msgs]))
+    check("assistant 消息带 tool_calls 回传",
+          any(m.get("tool_calls") for m in second_call["messages"]))
+
+    # --- 场景 5：工具返回 error 时模型能看到 ---
+    llm5 = FakeLLM([
+        FakeResp(FakeMsg(tool_calls=[FakeToolCall("call_E", "search_industry_news",
+                                                  '{"industry":"不存在"}')])),
+        FakeResp(FakeMsg(content="没有该行业数据")),
+    ])
+    with mock.patch("meeting_prep_agent.run_prep_tool") as rt:
+        rt.side_effect = lambda n, a: {"error": "没有 '不存在' 这个行业"}
+        run_agentic("X", "不存在", "议题", llm5, verbose=False)
+    tool_msgs5 = [m for m in llm5.calls[1]["messages"] if m.get("role") == "tool"]
+    check("工具错误被回传给模型",
+          tool_msgs5 and "error" in tool_msgs5[0]["content"],
+          tool_msgs5[0]["content"][:60] if tool_msgs5 else "无")
+
+
 # ============ C 组：匹配层 ============
 
 def test_find_customer():
@@ -415,6 +542,7 @@ def main():
     test_run_prep_tool()
     test_build_blocks()
     test_collect_data()
+    test_run_agentic()
     test_find_customer()
     test_clean_memory_ids()
     test_history_facts()
