@@ -154,8 +154,21 @@ def diagnose_repo_access(token, owner, name):
 
 
 def git(*args, timeout=120):
-    p = subprocess.run(["git", *args], cwd=PROJECT_ROOT,
-                       capture_output=True, text=True, timeout=timeout)
+    """跑一条 git 命令。
+
+    ★ 关键：加 `-c core.quotepath=false`。
+      git 默认（quotepath=true）会把非 ASCII 文件名转义成八进制，
+      也就是「交付工程说明.md」会变成
+      "\"\\344\\272\\244\\344\\272\\244...\""
+      后面 `git show master:<那个路径>` 就找不到文件了——
+      中文文件名的文件会**静默推不上去**，而且不报错。
+
+      这个坑是 2026-10-22 实测发现的：
+      降级推送后 tree 校验不一致，排查半天才发现是中文文件名。
+    """
+    p = subprocess.run(["git", "-c", "core.quotepath=false", *args],
+                       cwd=PROJECT_ROOT, capture_output=True, text=True,
+                       timeout=timeout)
     return p.returncode, (p.stdout or "") + (p.stderr or "")
 
 
@@ -250,24 +263,67 @@ def push_via_api(token, dry_run=False):
     # 待推的 commit 列表
     rc, out = git("rev-list", "--reverse", "origin/master..master")
     commits = [c for c in out.split() if c]
-    if not commits:
+    if not commits and not remote_tree_sha:
         print("  没有待推的 commit")
         return True
 
-    # 收集所有变更文件（相对 origin/master 的最终状态）
-    rc, out = git("diff", "--name-only", "origin/master", "master")
-    files = [f for f in out.splitlines() if f.strip()]
+    # ★ 收集要推的文件：直接跟**远端实际 tree** 对比，
+    #   不用本地缓存的 origin/master 做基准。
+    #
+    #   为什么：origin/master 是 git fetch 时的快照，
+    #   在 github.com 不通（fetch 失败）时它会一直停在旧值。
+    #   2026-10-22 实测踩过：远端已经推了新 commit，本地 origin/master
+    #   还是旧的，diff 出来的文件清单跟远端实际状态对不上，
+    #   结果有个中文名文件没推上去，tree 校验不一致才发现。
+    #
+    #   正确做法：列出远端 tree 里的所有文件，逐个跟本地比对 blob sha。
+    files = []
+    if remote_tree_sha:
+        # 远端 tree 的文件清单
+        # 注意：api() 返回的是 dict，不是 (状态码, 内容) 元组
+        tree_json = api(
+            "GET",
+            f"/repos/{OWNER}/{REPO_NAME}/git/trees/{remote_tree_sha}?recursive=1",
+            token)
+        if not isinstance(tree_json, dict):
+            tree_json = {}
+        远端文件 = {}
+        for 项 in tree_json.get("tree", []):
+            if 项.get("type") == "blob":
+                远端文件[项["path"]] = 项["sha"]
+
+        # 本地追踪的文件 + 它们的 blob sha
+        rc, out = git("ls-files", "-s")
+        本地文件 = {}
+        for 行 in out.splitlines():
+            段 = 行.split(None, 3)
+            if len(段) >= 4 and 段[3].strip():
+                本地文件[段[3].strip()] = 段[1]
+
+        # 远端有本地没有的 → 本地删了，要同步删除
+        for 路径 in sorted(set(远端文件) - set(本地文件)):
+            files.append(("删除", 路径))
+
+        # 本地有、blob sha 不同的 → 要推
+        for 路径 in sorted(set(本地文件) - set(远端文件)):
+            files.append(("新增", 路径))
+        for 路径 in sorted(set(本地文件) & set(远端文件)):
+            if 本地文件[路径] != 远端文件[路径]:
+                files.append(("修改", 路径))
+    else:
+        # 拿不到远端 tree，退回用本地缓存
+        rc, out = git("diff", "--name-only", "origin/master", "master")
+        files = [("修改", f) for f in out.splitlines() if f.strip()]
+
     if not files:
         print("  没有文件变更")
         return True
 
     print(f"  {len(commits)} 个 commit，{len(files)} 个文件")
+    for 动作, 路径 in files:
+        print(f"    {动作} {路径}")
 
     if dry_run:
-        for f in files[:20]:
-            print(f"    {f}")
-        if len(files) > 20:
-            print(f"    … 还有 {len(files) - 20} 个")
         return True
 
     # 远端当前 HEAD
@@ -280,19 +336,23 @@ def push_via_api(token, dry_run=False):
 
     # 逐个文件建 blob
     entries = []
-    for path in files:
+    for 动作, path in files:
+        if 动作 == "删除":
+            # 删除：tree 条目里 sha 传 null 就是删除
+            entries.append({"path": path, "mode": "100644", "type": "blob",
+                            "sha": None})
+            print(f"    删除 {path}")
+            continue
+
         rc, content = git("show", f"master:{path}")
         if rc != 0:
             print(f"  ⚠ 跳过 {path}（读取失败）")
             continue
         # mode 要跟远端现有的一致；新文件用 100644
         mode = "100644"
-        try:
-            rc, ls = git("ls-tree", "master", "--", path)
-            if rc == 0 and ls.strip():
-                mode = ls.split()[0]
-        except Exception:
-            pass
+        rc, ls = git("ls-tree", "master", "--", path)
+        if rc == 0 and ls.strip():
+            mode = ls.split()[0]
         sha = api_blob(token, content.encode("utf-8"))
         entries.append({"path": path, "mode": mode, "type": "blob", "sha": sha})
         print(f"    blob {path}")
