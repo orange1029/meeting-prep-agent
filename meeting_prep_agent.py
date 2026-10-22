@@ -384,22 +384,86 @@ def run_agentic(client, industry, topic, client_llm, verbose=True):
 def main():
     ap = argparse.ArgumentParser(
         description="会前简报 Agent：输入客户/行业/议题，输出一页 markdown 简报")
-    ap.add_argument("--client", required=True, help="客户名称，如 招商银行")
-    ap.add_argument("--industry", required=True, help="行业，如 金融")
-    ap.add_argument("--topic", required=True, help="本次议题，如 数据中台建设")
+    # ★ 体检模式不需要必填参数，所以这几个参数不能设 required。
+    # argparse 的 required=True 是在解析阶段强制检查的，
+    # 而体检模式恰恰要能在「参数不全」的场景下跑起来——
+    # 客户现场就是「我啥都没配，你告诉我缺什么」。
+    ap.add_argument("--client", help="客户名称，如 招商银行")
+    ap.add_argument("--industry", help="行业，如 金融")
+    ap.add_argument("--topic", help="本次议题，如 数据中台建设")
     ap.add_argument("--no-stream", action="store_true",
                     help="关闭进度输出（脚本内被调用时用）")
     ap.add_argument("--mode", choices=["template", "agentic"], default="template",
                     help="template=代码控流程(默认)；agentic=LLM 自主调工具")
     ap.add_argument("--out", help="自定义输出路径")
+    ap.add_argument("--config", help="指定配置文件路径（默认自动查找 config.toml）")
+    ap.add_argument("--check", action="store_true",
+                    help="只做部署体检，不跑简报")
     args = ap.parse_args()
 
-    if not os.environ.get("DEEPSEEK_API_KEY"):
-        print("✗ 未找到 DEEPSEEK_API_KEY，请在 .env 中配置")
+    # ============ 部署体检模式 ============
+    # 客户现场最耗时间的往往不是跑程序，是「到底哪里配错了」。
+    # 这个模式一次性把所有配置状态说清楚。
+    if args.check:
+        import deploy_config
+        配置 = deploy_config.读配置(args.config)
+        问题, 信息 = deploy_config.检查(配置)
+        print("=" * 66)
+        print("  部署体检")
+        print("=" * 66)
+        for 行 in 信息:
+            print(f"  {行}")
+        if 问题:
+            print("\n【发现问题】")
+            for 行 in 问题:
+                print(f"  ✗ {行}")
+            sys.exit(1)
+        print("\n  ✓ 一切正常")
+        sys.exit(0)
+
+    # 体检之外，三个业务参数必须齐
+    缺 = [名 for 名, 值 in (("--client", args.client),
+                          ("--industry", args.industry),
+                          ("--topic", args.topic)) if not 值]
+    if 缺:
+        print(f"✗ 缺少必填参数：{' '.join(缺)}")
+        print("  例：--client 招商银行 --industry 金融 --topic 数据中台建设")
         sys.exit(1)
 
-    client_llm = OpenAI(api_key=os.environ["DEEPSEEK_API_KEY"],
-                        base_url=BASE_URL)
+    # ============ 紧急停止开关检查 ============
+    # ★ 每次运行前都查，不缓存。
+    # 客户现场要能「立刻停下来」，所以这个检查必须在最前面，
+    # 而且不能因为上次读过就跳过。
+    import kill_switch
+    启用, 开关说明 = kill_switch.读状态()
+    if not 启用:
+        print(f"⏸ 当前处于停用状态，未执行任何操作。")
+        print(f"  {开关说明}")
+        print(f"  如需恢复：python kill_switch.py on 恢复")
+        sys.exit(3)   # 专用退出码，方便编排系统区分「停用」和「出错」
+
+    # ============ 读配置 ============
+    # 配置来源：命令行 --config > 环境变量 DEPLOY_CONFIG > 配置文件 > 环境变量 > 默认值
+    import deploy_config
+    配置 = deploy_config.读配置(args.config)
+
+    if not 配置.get("api_key"):
+        print("✗ 未找到大模型 API 密钥")
+        print(f"  配置来源：{配置.get('_config_source')}")
+        print("  两种配法（任选其一）：")
+        print("    ① 设环境变量 DEEPSEEK_API_KEY=sk-xxx")
+        print("    ② 在 config.toml 的 [llm] 段加 api_key = \"sk-xxx\"")
+        print("  跑体检看详细情况：python meeting_prep_agent.py --check")
+        sys.exit(1)
+
+    # 覆盖模块级默认值（读配置后才知道真实值）
+    global MODEL, BASE_URL
+    MODEL = 配置.get("model", MODEL)
+    BASE_URL = 配置.get("base_url", BASE_URL)
+
+    client_llm = OpenAI(api_key=配置["api_key"],
+                        base_url=BASE_URL,
+                        timeout=配置.get("timeout", 60))
     verbose = not args.no_stream
 
     print("=" * 66)
@@ -409,6 +473,7 @@ def main():
     print(f"  行业：{args.industry}")
     print(f"  议题：{args.topic}")
     print(f"  模式：{args.mode}")
+    print(f"  模型：{MODEL}")
 
     t0 = time.perf_counter()
     if verbose:
@@ -460,12 +525,29 @@ def main():
 
 def save(content, args, rounds=None, elapsed=0.0):
     """保存简报。文件名带日期，避免多次运行互相覆盖"""
-    os.makedirs(BRIEFING_DIR, exist_ok=True)
+    # 输出目录走配置（客户可能改成绝对路径，比如客户的共享盘）
+    输出目录 = BRIEFING_DIR
+    try:
+        import deploy_config
+        配置 = deploy_config.读配置(getattr(args, "config", None))
+        输出目录 = 配置.get("output_dir", BRIEFING_DIR)
+    except Exception:
+        # 配置读不了就用默认值，别因为这个把整个运行搞挂
+        pass
+
+    # 相对路径以「程序所在目录」为基准，不是当前工作目录。
+    # 客户双击 exe 时工作目录可能是任意路径，用 cwd 会存到奇怪的地方。
+    if not os.path.isabs(输出目录):
+        import deploy_config
+        基准 = deploy_config._程序目录()
+        输出目录 = os.path.join(基准, 输出目录)
+
+    os.makedirs(输出目录, exist_ok=True)
     if args.out:
         path = args.out
     else:
         safe = args.client.replace("/", "_").strip()
-        path = os.path.join(BRIEFING_DIR,
+        path = os.path.join(输出目录,
                             f"{safe}_{date.today().isoformat()}.md")
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
