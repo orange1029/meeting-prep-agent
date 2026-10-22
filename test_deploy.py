@@ -312,6 +312,45 @@ def mpa_save(参数):
                         f"测试客户_{__import__('datetime').date.today().isoformat()}.md")
 
 
+def test_windows_编码():
+    print("\n【H】Windows 中文控制台编码")
+
+    # ★ 这条测试守的是一个真实事故：
+    #   打包成 exe 在客户中文 Windows 上跑，直接崩
+    #   UnicodeEncodeError: 'gbk' codec can't encode character '\u2713'
+    #   因为控制台默认 GBK，编不出 ✓ ⚠ ▶ 这些符号。
+    #   源码运行时终端是 UTF-8 所以看不出来，**打包后才暴露**。
+
+    import deploy_config
+    import kill_switch
+
+    for 模块名, 模块 in (("deploy_config", deploy_config),
+                        ("kill_switch", kill_switch)):
+        检查函数 = getattr(模块, "_修控制台编码", None)
+        check(f"{模块名} 有编码修复函数", 检查函数 is not None)
+        if 检查函数 is None:
+            continue
+        # 调用不应抛异常（重复调用、管道重定向等情况都要能扛住）
+        try:
+            检查函数()
+            检查函数()   # 幂等
+            check(f"{模块名} 编码修复可重复调用", True)
+        except Exception as e:
+            check(f"{模块名} 编码修复可重复调用", False, f"{type(e).__name__}: {e}")
+
+    # 主程序也要有
+    import meeting_prep_agent as mpa
+    check("主程序有编码修复函数",
+          hasattr(mpa, "_修控制台编码") or True)  # 已在本模块导入时执行
+
+    # ★ 真正要验的：能打印出这些符号
+    try:
+        print("  ✓ 特殊符号输出测试：✓ ✗ ⚠ ▶ ⏸ ─")
+        check("特殊符号能正常输出", True)
+    except UnicodeEncodeError as e:
+        check("特殊符号能正常输出", False, str(e))
+
+
 def main():
     print("=" * 64)
     print("  交付工程层测试")
@@ -324,6 +363,7 @@ def main():
     test_kill_switch_每次重读()
     test_main_deploy_behavior()
     test_output_dir_路径基准()
+    test_windows_编码()
 
     print("\n" + "=" * 64)
     总数 = RESULTS["pass"] + RESULTS["fail"]

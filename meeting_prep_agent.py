@@ -41,6 +41,40 @@ from openai import OpenAI
 from prep_tools_impl import find_customer, run_prep_tool
 from prep_tools_schema import ALL_PREP_TOOLS
 
+
+# ============ Windows 中文控制台编码处理 ============
+# ★ 这是交付给客户时踩过的真坑：
+#   打包成 exe 在客户中文 Windows 上跑，直接崩：
+#     UnicodeEncodeError: 'gbk' codec can't encode character '\u2713'
+#   原因：Windows 控制台默认 GBK 编码，而程序里用了 ✓ ⚠ ▶ 这些符号，
+#   GBK 编不出来。源码运行时因为终端是 UTF-8 所以没事，**打包后才暴露**。
+#
+#   而且中文输出也会变乱码。
+#
+# 修法：启动时把标准输出强制成 UTF-8。
+#   reconfigure 是 Python 3.7+ 的方法，对已创建的流也生效。
+#   必须在任何 print 之前做。
+def _修控制台编码():
+    for 流 in (sys.stdout, sys.stderr):
+        if 流 is None:
+            continue
+        try:
+            流.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            # 老 Python 或特殊流（被重定向到管道等）可能不支持，忽略
+            pass
+    # Windows 控制台要额外设代码页，否则 reconfigure 也可能不够
+    if os.name == "nt":
+        try:
+            import ctypes
+            ctypes.windll.kernel32.SetConsoleOutputCP(65001)   # UTF-8
+            ctypes.windll.kernel32.SetConsoleCP(65001)
+        except Exception:
+            pass
+
+
+_修控制台编码()
+
 load_dotenv()
 
 MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")

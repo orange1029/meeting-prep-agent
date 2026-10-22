@@ -115,7 +115,9 @@ def 找打包环境():
 
     # ★ 兜底：扫工作区根目录，找任意一个 .venv-build
     #   （打包工具常装在工具环境里，而不是项目里）
-    工作区根 = os.path.dirname(os.path.dirname(当前目录))
+    #   工作区根 = 项目目录的上一级。项目在 D:\workbuddy1\<时间戳>\，
+    #   所以 dirname(项目) 就是 D:\workbuddy1。
+    工作区根 = os.path.dirname(当前目录)
     if os.path.isdir(工作区根):
         for 名 in sorted(os.listdir(工作区根)):
             for 子 in ("Scripts", "bin"):

@@ -31,6 +31,29 @@ deploy_config.py — 部署配置层
 import os
 import sys
 
+# ============ Windows 中文控制台编码处理 ============
+# ★ 客户 90% 用中文 Windows，控制台默认 GBK，
+#   打印 ✓ ✠ 这类符号会抛 UnicodeEncodeError。
+#   必须在任何输出之前修，且要同时修 stdout 和 stderr。
+def _修控制台编码():
+    for 流 in (sys.stdout, sys.stderr):
+        if 流 is None:
+            continue
+        try:
+            流.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+    if os.name == "nt":
+        try:
+            import ctypes
+            ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+            ctypes.windll.kernel32.SetConsoleCP(65001)
+        except Exception:
+            pass
+
+
+_修控制台编码()
+
 # ============ 配置文件格式：TOML（Python 3.11+ 内置 tomllib，无需装包）============
 # 为什么用 TOML 而不是 JSON/YAML：
 #   · JSON 不支持注释，客户看不懂

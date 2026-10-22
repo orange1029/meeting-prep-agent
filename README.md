@@ -180,18 +180,54 @@ python prep_tools_schema.py       # 工具定义格式校验
 python prep_tools_impl.py         # 简报工具逻辑自测
 python tools_impl.py              # 业务工具自测（41 项）
 python trace_logger.py            # 链路追踪格式自测
-python test_prep_tools.py         # 简报链路测试（100 项，不调 API）
+python test_prep_tools.py         # 简报链路测试（113 项，不调 API）
 python test_evals_config.py       # 评估用例配置自检（29 项，不调 API）
+python test_deploy.py             # 交付层测试（40 项，不调 API）
 
 # 需要 API Key 的
 python meeting_prep_agent.py --client "招商银行" --industry "金融" --topic "测试"
+python test_errors.py             # 错误注入（26 项，调 API）
+python test_stream_chat.py        # 流式分片（25 项，调 API）
+
+# 部署体检（客户现场先跑这个）
+python meeting_prep_agent.py --check
 
 # 全部测试
-pytest test_deepseek.py -q
+pytest -q
 ```
 
 **README 里承诺的命令全部实跑验证过。** 文档说假话比没文档更糟——
 如果你发现某条跑不通，那是代码的问题，不是文档的问题。
+
+### 部署到客户电脑
+
+```bash
+# 打交付包（三种形态）
+python build_package.py            # 全打
+python build_package.py exe        # 只打单文件 exe
+```
+
+| 形态 | 客户要什么 | 适合 |
+|---|---|---|
+| `dist/dist-win/简报助手.exe` | 什么都不用装 | 没 Python、没管理权限的机器 |
+| `dist/dist-portable/` | 有 Python 3.10+ | 愿意装东西但不想折腾 |
+| `dist/dist-docker/` | 有 Docker | 环境标准化、要求可审计 |
+
+**★ 配置、密钥、记忆库、简报输出全在程序外**，不烤进包里——
+客户改配置不用重新打包，密钥不跟着包走，客户的历史沟通数据不躺在别人的交付物里。
+
+**★ 紧急停止开关**（`kill_switch.py`）：
+
+```bash
+python kill_switch.py                        # 看状态
+python kill_switch.py off 客户要求暂停         # 停用
+python kill_switch.py on  已和客户确认恢复      # 恢复
+```
+
+状态外置在独立文件、每次读文件（改完立即生效，不用重启），
+停用时程序返回**退出码 3**（专用码，编排系统能区分「被停用」和「出错」）。
+
+完整设计说明见 `交付工程说明.md`。
 
 ### 简报链路有自己的测试
 
@@ -239,6 +275,10 @@ pytest test_deepseek.py -q
 4. **客户名匹配是字面的，不是语义** —— 支持别名表（招行→招商银行）和子串匹配，
    但「招银银行」这种错字认不出，会明确报「未找到」
 5. **单次运行，无并发** —— 真实场景需要考虑多个顾问同时查询
+6. **exe 只在 Windows 上验证过** —— PyInstaller 产物与平台绑定，
+   Linux/macOS 客户要用绿色包或 Docker（已提供 Dockerfile，未在本机验证构建）
+7. **kill switch 只挡「启动时」** —— 程序跑起来之后不会中途检查开关，
+   中途生效需要调用方在循环里自己检查（批量场景必须这样设计）
 
 ---
 

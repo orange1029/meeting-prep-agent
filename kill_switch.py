@@ -42,6 +42,28 @@ import json
 import os
 import sys
 
+# ============ Windows 中文控制台编码处理 ============
+# ★ 客户中文 Windows 控制台默认 GBK，
+#   打印 ▶ ⏸ ✓ 这类符号会抛 UnicodeEncodeError。
+def _修控制台编码():
+    for 流 in (sys.stdout, sys.stderr):
+        if 流 is None:
+            continue
+        try:
+            流.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+    if os.name == "nt":
+        try:
+            import ctypes
+            ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+            ctypes.windll.kernel32.SetConsoleCP(65001)
+        except Exception:
+            pass
+
+
+_修控制台编码()
+
 # 开关文件的名字。放在程序旁边，方便运维找。
 # 客户可以改名（配置项 kill_switch_file），但默认这个最好记。
 默认文件名 = "kill_switch.json"

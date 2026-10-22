@@ -37,5 +37,12 @@ trace_*.jsonl
 # 简报输出（本地保留，不入库）
 briefings/
 
+# 交付包构建产物（每次都变，不入库）
+dist/
+.build_tmp/
+
+# 紧急停止开关的运行时状态（是运行时状态，不是配置）
+kill_switch.json
+
 # README 渲染验证页（临时产物，不入库）
 README_render_check.html
