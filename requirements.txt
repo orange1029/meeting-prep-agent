@@ -7,6 +7,7 @@
 openai>=1.0          # DeepSeek 兼容 OpenAI 协议
 python-dotenv>=1.0   # 读取 .env
 pytest>=7.0          # 测试（可选）
+pyyaml>=6.0          # eval_cases.py / evals/*.yaml（评估用例配置）
 
 # ---------------------------------------------------------------------------
 # 以下是项目中其他模块的依赖，**会前简报本身不需要**。
@@ -18,3 +19,8 @@ pytest>=7.0          # 测试（可选）
 # "autogen-agentchat>=0.4"                        # demo_autogen.py
 # "autogen-ext[openai]"                           # demo_autogen.py
 # crewai                                          # demo_crewai.py
+#
+# 想跑评估框架（eval_mcp_agent.py）需要 fastmcp + pyyaml：
+#   python -m venv .venv-agents
+#   .venv-agents/Scripts/pip install fastmcp>=2.0 pyyaml openai python-dotenv
+#   .venv-agents/Scripts/python.exe eval_mcp_agent.py
