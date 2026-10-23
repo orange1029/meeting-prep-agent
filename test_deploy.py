@@ -354,6 +354,69 @@ def test_main_deploy_behavior():
                 check("参数缺失时报错", e.code == 1, f"退出码 {e.code}")
 
 
+def test_记忆库路径_与体检一致():
+    """★ 回归：记忆库路径必须以程序目录为基准，且与体检报告一致。
+
+    背景：打包成单文件 exe 后，memory_store 用 __file__ 算路径，
+    而 __file__ 指向 PyInstaller 的临时解包目录——
+    结果 exe 模式下记忆库永远读不到，简报里「历史沟通」那段永远是空的。
+    开发机上跑源码完全正常，只有交付出去才会暴露。
+    """
+    print("\n【G2】记忆库路径以程序目录为基准（exe 模式下也能读到）")
+
+    import memory_store
+
+    # --- 路径基准：不是源码目录，而是程序目录 ---
+    check("记忆目录挂在程序目录下",
+          os.path.abspath(memory_store.MEMORY_DIR) ==
+          os.path.abspath(os.path.join(deploy_config._程序目录(), "memory")),
+          memory_store.MEMORY_DIR)
+    check("记忆文件在记忆目录下",
+          memory_store.MEMORY_FILE ==
+          os.path.join(memory_store.MEMORY_DIR, "memories.json"),
+          memory_store.MEMORY_FILE)
+
+    # --- 模拟 exe 模式：sys.frozen = True ---
+    旧frozen = getattr(sys, "frozen", False)
+    旧argv = sys.argv
+    try:
+        sys.frozen = True
+        sys.argv = ["简报助手.exe"]
+        with mock.patch.object(sys, "executable",
+                               os.path.join(deploy_config._程序目录(), "简报助手.exe")):
+            目录 = memory_store._程序目录()
+            check("exe 模式下程序目录 = exe 所在目录",
+                  os.path.abspath(目录) ==
+                  os.path.abspath(deploy_config._程序目录()), 目录)
+            check("exe 模式下记忆库不在临时解包目录",
+                  "_MEI" not in memory_store._程序目录(),
+                  memory_store._程序目录())
+    finally:
+        if 旧frozen:
+            sys.frozen = 旧frozen
+        else:
+            try:
+                del sys.frozen
+            except AttributeError:
+                pass
+        sys.argv = 旧argv
+
+    # --- 体检说的路径 = 程序实际读的路径 ---
+    临时 = tempfile.mkdtemp(prefix="mempath_")
+    try:
+        配置 = dict(deploy_config.DEFAULTS,
+                    memory_dir=os.path.join(临时, "mymem"),
+                    _config_source="测试")
+        with mock.patch.object(deploy_config, "读配置", return_value=配置):
+            实际 = memory_store._解析记忆文件()
+        体检说的 = os.path.join(配置["memory_dir"], "memories.json")
+        check("体检路径 == 程序实际读的路径",
+              os.path.abspath(实际) == os.path.abspath(体检说的),
+              f"体检:{体检说的} 实际:{实际}")
+    finally:
+        shutil.rmtree(临时, ignore_errors=True)
+
+
 def test_output_dir_路径基准():
     print("\n【G】输出目录以程序目录为基准")
 
@@ -441,6 +504,7 @@ def main():
     test_kill_switch_每次重读()
     test_kill_switch_内置到主程序()
     test_main_deploy_behavior()
+    test_记忆库路径_与体检一致()
     test_output_dir_路径基准()
     test_windows_编码()
 

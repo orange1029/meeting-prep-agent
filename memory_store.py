@@ -30,6 +30,7 @@ memory_store.py — 长期记忆存储层
 import json
 import os
 import re
+import sys
 import time
 from datetime import datetime
 
@@ -40,8 +41,45 @@ MEMORY_TYPES = {
     "observation": "基于数据的推测，如「上海区教育行业增长放缓」",
 }
 
-MEMORY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "memory")
+def _程序目录():
+    """程序所在目录。打包成 exe 后是 exe 所在目录。
+
+    ★ 这个函数存在的理由：打包成单文件 exe 后，__file__ 指向
+      PyInstaller 的临时解包目录（一个随进程生灭的临时文件夹），
+      里面的 memory/ 是打包时的空壳，不是客户真正在用的记忆库。
+      结果：exe 模式下记忆库永远读不到，简报里「历史沟通」那段永远是空的。
+
+      所以打包后必须用 sys.executable 所在目录 —— 那才是客户放 exe 的地方，
+      客户的 memory/ 就在它旁边。
+    """
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+MEMORY_DIR = os.path.join(_程序目录(), "memory")
 MEMORY_FILE = os.path.join(MEMORY_DIR, "memories.json")
+
+
+def _解析记忆文件():
+    """算出记忆库文件的实际路径。
+
+    优先级：config.toml 的 memory_dir > 程序同级的 memory/memories.json
+    —— 跟 deploy_config.检查() 用的完全同一套规则，
+    保证「体检报告的路径」和「程序实际读的路径」永远一致。
+    """
+    目录 = ""
+    try:
+        import deploy_config
+        目录 = (deploy_config.读配置().get("memory_dir") or "").strip()
+    except Exception:
+        # 配置层不可用时退回默认路径，不能因为读不到配置就整个崩掉
+        目录 = ""
+    if 目录:
+        if not os.path.isabs(目录):
+            目录 = os.path.join(_程序目录(), 目录)
+        return os.path.join(目录, "memories.json")
+    return MEMORY_FILE
 
 # 停用词：中文高频虚词 + 英文常见词。
 # 注意：这些单字只在「独立成词」时才算停用词，不能无条件从分词里剔除——
@@ -181,7 +219,13 @@ def _is_cjk(s):
 # ============ 存储主体 ============
 
 class MemoryStore:
-    def __init__(self, path=MEMORY_FILE, decay_after_days=30):
+    def __init__(self, path=None, decay_after_days=30):
+        # path 不传时用「配置里的 memory_dir → 程序同级的 memory/」，
+        # 跟 deploy_config 检查时算的是同一个路径。
+        # 之前这里写死 MEMORY_FILE（源码目录），而体检显示的是程序目录，
+        # 两处对不上，客户会看到「体检说记忆库在，转头程序说没历史记录」。
+        if path is None:
+            path = _解析记忆文件()
         self.path = path
         self.decay_after_days = decay_after_days
         self.memories = []
