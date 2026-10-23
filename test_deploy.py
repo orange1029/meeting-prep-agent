@@ -135,6 +135,30 @@ def test_config_precedence():
                 配置 = deploy_config.读配置(None)
                 check("自动找到的配置文件 < 环境变量",
                       配置["model"] == "from-env", 配置["model"])
+
+        # ★ 回归：自动找到的 config.toml 里写了密钥，环境变量**没设**时
+        #   文件里的值必须生效。
+        #   （早先的写法是「自动找到时 api_key 一律不让文件生效」，
+        #     结果客户照部署说明把密钥写进 config.toml，程序却报
+        #     「未找到密钥」——这条规则把文件的值一起挡掉了。）
+        密钥文件 = os.path.join(临时, "with_key.toml")
+        with open(密钥文件, "w", encoding="utf-8") as f:
+            f.write('[llm]\napi_key = "sk-filekey123456"\n')
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with mock.patch.object(deploy_config, "找配置文件",
+                                   return_value=(密钥文件, "程序目录")):
+                配置 = deploy_config.读配置(None)
+                check("自动找到的配置文件里写了密钥 → 生效（回归）",
+                      配置["api_key"] == "sk-filekey123456", 配置["api_key"])
+
+        # 同一场景下环境变量确实设了 → 环境变量赢
+        with mock.patch.dict(os.environ,
+                             {"DEEPSEEK_API_KEY": "sk-envkey1234567"}):
+            with mock.patch.object(deploy_config, "找配置文件",
+                                   return_value=(密钥文件, "程序目录")):
+                配置 = deploy_config.读配置(None)
+                check("环境变量确实设了 → 环境变量赢（回归）",
+                      配置["api_key"] == "sk-envkey1234567", 配置["api_key"])
     finally:
         shutil.rmtree(临时, ignore_errors=True)
 
@@ -236,6 +260,60 @@ def test_kill_switch_每次重读():
         启用2, 说明 = kill_switch.读状态(文件)
         check("外部改文件后立即生效（不缓存）", not 启用2, 说明)
         check("读到新的原因", "运维手工停用" in 说明, 说明)
+    finally:
+        shutil.rmtree(临时, ignore_errors=True)
+
+
+def test_kill_switch_内置到主程序():
+    """★ 回归：开关必须内置到主程序里。
+
+    背景：exe 是发给「客户电脑上没有 Python」的人的。
+    如果急停开关只能靠 kill_switch.py 控制，客户急停时还得先装 Python，
+    等于没有开关。所以 exe 本身必须提供 --kill-switch on/off/status。
+    """
+    print("\n【E2】急停开关内置到主程序（exe 客户没有 Python 也能急停）")
+
+    import meeting_prep_agent as mpa
+    import subprocess
+
+    临时 = tempfile.mkdtemp(prefix="killsw3_")
+    try:
+        # --- 源码层面：参数被识别 ---
+        检查源码 = "".join(
+            open(os.path.join(os.path.dirname(os.path.abspath(mpa.__file__)),
+                              "meeting_prep_agent.py"),
+                 encoding="utf-8").read())
+        check("主程序有 --kill-switch 参数", "--kill-switch" in 检查源码)
+        check("主程序内置了 off 分支",
+              '"off"' in 检查源码 or "'off'" in 检查源码)
+        check("主程序内置了 on 分支",
+              '"on"' in 检查源码 or "'on'" in 检查源码)
+        check("停用提示区分 exe / 源码两种恢复方式",
+              "frozen" in 检查源码 and "--kill-switch on" in 检查源码)
+
+        # --- 行为层面：真的能通过主程序改开关状态 ---
+        开关文件 = os.path.join(临时, "kill_switch.json")
+        with mock.patch.object(kill_switch, "开关路径",
+                               return_value=开关文件):
+            kill_switch.启用("测试初始", 开关文件)
+            启用, _ = kill_switch.读状态(开关文件)
+            check("初始为启用", 启用)
+
+            kill_switch.停用("主程序内置命令停用", 开关文件)
+            启用, _ = kill_switch.读状态(开关文件)
+            check("通过开关模块停用后，状态为停用", not 启用)
+
+            kill_switch.启用("主程序内置命令恢复", 开关文件)
+            启用, _ = kill_switch.读状态(开关文件)
+            check("通过开关模块恢复后，状态为启用", 启用)
+
+        # --- 打包后的 exe 也要有（源码在 build_package 的 hiddenimports 里）---
+        打包脚本 = os.path.join(os.path.dirname(os.path.abspath(mpa.__file__)),
+                                "build_package.py")
+        if os.path.exists(打包脚本):
+            打包内容 = open(打包脚本, encoding="utf-8").read()
+            check("打包脚本把 kill_switch 列为 hiddenimport",
+                  "kill_switch" in 打包内容, "打包时需 --hidden-import kill_switch")
     finally:
         shutil.rmtree(临时, ignore_errors=True)
 
@@ -361,6 +439,7 @@ def main():
     test_config_check()
     test_kill_switch()
     test_kill_switch_每次重读()
+    test_kill_switch_内置到主程序()
     test_main_deploy_behavior()
     test_output_dir_路径基准()
     test_windows_编码()

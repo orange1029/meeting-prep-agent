@@ -433,7 +433,32 @@ def main():
     ap.add_argument("--config", help="指定配置文件路径（默认自动查找 config.toml）")
     ap.add_argument("--check", action="store_true",
                     help="只做部署体检，不跑简报")
+    ap.add_argument("--kill-switch", choices=["on", "off", "status"],
+                    help="紧急停止开关：off=立刻停用，on=恢复，status=看状态"
+                         "（内置到 exe 里，客户手上只有 exe 时也能急停）")
     args = ap.parse_args()
+
+    # ============ 紧急停止开关（内置模式）============
+    # ★ 为什么要有这个内置入口：
+    #   exe 是发给「客户电脑上没有 Python」的人的。
+    #   但急停开关恰恰是这种场景最需要的能力——
+    #   如果开关只能靠 kill_switch.py 控制，那客户急停时还得先装 Python，
+    #   等于没有开关。所以开关必须和主程序同一个 exe。
+    if args.kill_switch:
+        import kill_switch
+        if args.kill_switch == "status":
+            启用, 说明 = kill_switch.读状态()
+            print(f"{'✓ 已启用' if 启用 else '⏸ 已停用'}。{说明}")
+            sys.exit(0 if 启用 else 3)
+        elif args.kill_switch == "off":
+            路径 = kill_switch.停用("通过程序内置命令停用")
+            print(f"✓ 已停用。开关文件：{路径}")
+            print("  恢复：简报助手.exe --kill-switch on")
+            sys.exit(0)
+        else:
+            路径 = kill_switch.启用("通过程序内置命令恢复")
+            print(f"✓ 已启用。开关文件：{路径}")
+            sys.exit(0)
 
     # ============ 部署体检模式 ============
     # 客户现场最耗时间的往往不是跑程序，是「到底哪里配错了」。
@@ -473,7 +498,12 @@ def main():
     if not 启用:
         print(f"⏸ 当前处于停用状态，未执行任何操作。")
         print(f"  {开关说明}")
-        print(f"  如需恢复：python kill_switch.py on 恢复")
+        # 提示两种恢复方式：打包成 exe 时用内置命令，
+        # 源码运行时用 kill_switch.py（客户电脑上没有 Python 也能用）。
+        if getattr(sys, "frozen", False):
+            print("  如需恢复：简报助手.exe --kill-switch on")
+        else:
+            print("  如需恢复：python kill_switch.py on 恢复")
         sys.exit(3)   # 专用退出码，方便编排系统区分「停用」和「出错」
 
     # ============ 读配置 ============
